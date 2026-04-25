@@ -218,9 +218,11 @@ async def sms_incoming(request: Request):
         system_prompt = coach_res.data[0]["generated_system_prompt"]
 
     # Inject active context into system prompt
-    from routes.ai import HUMAN_BEHAVIOR_RULES
+    from routes.ai import HUMAN_BEHAVIOR_RULES, CONVICTION_RULES
     if active_context:
-        system_prompt = f"{system_prompt}\n\n{active_context}\n\n{HUMAN_BEHAVIOR_RULES}"
+        system_prompt = f"{system_prompt}\n\n{active_context}\n\n{HUMAN_BEHAVIOR_RULES}\n\n{CONVICTION_RULES}"
+    else:
+        system_prompt = f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}\n\n{CONVICTION_RULES}"
 
     # Generate response using Gemini with full context awareness
     try:
