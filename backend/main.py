@@ -46,3 +46,8 @@ app.include_router(users_router, prefix="/users", tags=["Users"])
 @app.get("/health")
 def health_check():
     return {"status": "ok", "service": "stackd-api"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

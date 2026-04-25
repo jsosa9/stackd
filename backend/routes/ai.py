@@ -5,6 +5,9 @@ import httpx
 import re
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
+from datetime import datetime, timedelta
+import pytz
+import asyncio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from supabase import create_client
@@ -17,12 +20,14 @@ from html.parser import HTMLParser
 
 load_dotenv()
 
-# Setup logging with rotating file handler
+# Setup logging with rotating file handlers for different modules
 log_dir = Path(__file__).parent.parent.parent / "logs"
 log_dir.mkdir(exist_ok=True)
+
+# Persona logger
 persona_logger = logging.getLogger("persona")
 persona_logger.setLevel(logging.DEBUG)
-handler = RotatingFileHandler(
+persona_handler = RotatingFileHandler(
     log_dir / "persona.log",
     maxBytes=10 * 1024 * 1024,  # 10MB
     backupCount=5,
@@ -30,8 +35,41 @@ handler = RotatingFileHandler(
 formatter = logging.Formatter(
     "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
-handler.setFormatter(formatter)
-persona_logger.addHandler(handler)
+persona_handler.setFormatter(formatter)
+persona_logger.addHandler(persona_handler)
+
+# Intents logger
+intents_logger = logging.getLogger("intents")
+intents_logger.setLevel(logging.DEBUG)
+intents_handler = RotatingFileHandler(
+    log_dir / "intents.log",
+    maxBytes=10 * 1024 * 1024,  # 10MB
+    backupCount=5,
+)
+intents_handler.setFormatter(formatter)
+intents_logger.addHandler(intents_handler)
+
+# Patterns logger
+patterns_logger = logging.getLogger("patterns")
+patterns_logger.setLevel(logging.DEBUG)
+patterns_handler = RotatingFileHandler(
+    log_dir / "patterns.log",
+    maxBytes=10 * 1024 * 1024,  # 10MB
+    backupCount=5,
+)
+patterns_handler.setFormatter(formatter)
+patterns_logger.addHandler(patterns_handler)
+
+# Streaks logger
+streaks_logger = logging.getLogger("streaks")
+streaks_logger.setLevel(logging.DEBUG)
+streaks_handler = RotatingFileHandler(
+    log_dir / "streaks.log",
+    maxBytes=10 * 1024 * 1024,  # 10MB
+    backupCount=5,
+)
+streaks_handler.setFormatter(formatter)
+streaks_logger.addHandler(streaks_handler)
 
 logger = logging.getLogger(__name__)
 
@@ -625,16 +663,22 @@ async def generate_motivation_text(user_id: str) -> str:
     Fetches the user's generated_system_prompt and motivation style preferences,
     then calls Gemini Flash 1.5 to generate a single short motivational text
     in the coach's voice matching their chosen styles. Returns the text.
+    
+    Now includes active user context for situation awareness.
     """
     logger.info(f"Generating motivation text for user {user_id}")
 
     # Fetch the saved system prompt
     coach_res = supabase.table("coach_settings").select("generated_system_prompt, coach_name").eq("user_id", user_id).execute()
     if not coach_res.data or not coach_res.data[0].get("generated_system_prompt"):
-        # Fallback: build it first
         system_prompt = await build_coach_personality(user_id)
     else:
         system_prompt = coach_res.data[0]["generated_system_prompt"]
+
+    # Get active context
+    active_context = await get_active_context(user_id)
+    if active_context:
+        system_prompt = f"{system_prompt}\n\n{active_context}"
 
     # Fetch motivation style preferences
     sched_res = supabase.table("schedule").select("motivation_styles, motivation_frequency").eq("user_id", user_id).execute()
@@ -664,6 +708,8 @@ async def generate_checkin_text(user_id: str, goal: str) -> str:
     Fetches the user's generated_system_prompt and the last 10 messages from Supabase,
     then calls Gemini Flash 1.5 with full context to generate a check-in message
     for the specific goal. Returns the text.
+    
+    Now includes active user context and upcoming reminders for situation awareness.
     """
     logger.info(f"Generating check-in text for user {user_id}, goal: {goal}")
 
@@ -673,6 +719,19 @@ async def generate_checkin_text(user_id: str, goal: str) -> str:
         system_prompt = await build_coach_personality(user_id)
     else:
         system_prompt = coach_res.data[0]["generated_system_prompt"]
+
+    # Get active context and upcoming reminders
+    active_context = await get_active_context(user_id)
+    upcoming_reminders = await get_upcoming_reminders_preview(user_id)
+    
+    context_additions = []
+    if active_context:
+        context_additions.append(active_context)
+    if upcoming_reminders:
+        context_additions.append(upcoming_reminders)
+    
+    if context_additions:
+        system_prompt = f"{system_prompt}\n\n{chr(10).join(context_additions)}"
 
     # Fetch last 10 messages for conversation context
     messages_res = (
@@ -764,6 +823,577 @@ async def deliver_motivation_text(user_id: str) -> str:
     text = response.text.strip()
     logger.info(f"Delivered motivation for user {user_id}: {text[:60]}...")
     return text
+
+
+# ---------------------------------------------------------------------------
+# Intent Detection and Context Awareness
+# ---------------------------------------------------------------------------
+
+async def extract_intents(user_id: str, message: str, user_timezone: str) -> dict:
+    """
+    Extract all actionable information from an incoming SMS message using Claude Haiku.
+    
+    Parses commitments, deadlines, context updates, rescheduling requests, social bets,
+    mood, energy, and progress updates from natural language.
+    
+    Args:
+        user_id: UUID of the user
+        message: SMS message body
+        user_timezone: User's timezone (e.g., 'America/New_York')
+        
+    Returns:
+        Dict with keys: has_actionable_content, commitments, deadlines, context_updates,
+        rescheduling, social_bets, mood, energy, progress_update
+        
+    Error handling:
+        - If JSON parsing fails, logs error and returns dict with has_actionable_content=False
+        - Never crashes the incoming SMS handler
+    """
+    intents_logger.debug(f"Extracting intents from message by user {user_id}")
+    
+    try:
+        # Get current time in user's timezone
+        user_tz = pytz.timezone(user_timezone)
+        current_time_user = datetime.now(user_tz)
+        current_time_str = current_time_user.strftime("%Y-%m-%d %H:%M %Z")
+        
+        prompt = f"""Analyze this SMS message and extract ALL actionable information. Be thorough but only extract what is clearly stated, never assume.
+
+Message: {message}
+User timezone: {user_timezone}
+Current time: {current_time_str}
+
+Return a JSON object with exactly these fields:
+{{
+    "has_actionable_content": true/false,
+    "commitments": [
+        {{
+            "description": "what they committed to doing",
+            "scheduled_for_iso": "ISO 8601 datetime in UTC based on their timezone",
+            "scheduled_for_human": "human readable like tomorrow morning at 8am",
+            "reminder_message": "natural casual reminder to send at that time, written in coach voice, max 2 sentences"
+        }}
+    ],
+    "deadlines": [
+        {{
+            "description": "what the deadline is for",
+            "deadline_date_iso": "ISO 8601 date",
+            "daily_checkin": true/false,
+            "urgency": "low/medium/high"
+        }}
+    ],
+    "context_updates": [
+        {{
+            "type": "struggle/win/personal/travel/health/mood/energy/social",
+            "description": "specific thing to remember, written as a fact about the user",
+            "expires_in_hours": 24
+        }}
+    ],
+    "rescheduling": [
+        {{
+            "original_goal": "what they are rescheduling",
+            "new_time": "when they want to do it instead",
+            "skip_todays_checkin": true/false
+        }}
+    ],
+    "social_bets": [
+        {{
+            "description": "what they bet or committed to with someone",
+            "target": "what they need to achieve",
+            "deadline_iso": "ISO 8601 date if mentioned"
+        }}
+    ],
+    "mood": {{
+        "detected": true/false,
+        "level": "great/good/neutral/low/struggling",
+        "reason": "brief reason if stated"
+    }},
+    "energy": {{
+        "detected": true/false,
+        "level": "high/normal/low",
+        "reason": "brief reason if stated e.g. bad sleep, sick, energized"
+    }},
+    "progress_update": {{
+        "detected": true/false,
+        "goal": "what goal this relates to",
+        "achievement": "what they accomplished",
+        "metric": "number or specific result if mentioned"
+    }}
+}}
+
+Return valid JSON only. No markdown, no explanation, just the JSON object."""
+        
+        response = anthropic.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        
+        response_text = response.content[0].text
+        
+        # Try to parse as JSON
+        try:
+            intents = json.loads(response_text)
+            intents_logger.info(f"Extracted intents for user {user_id}: {json.dumps(intents, default=str)}")
+            return intents
+        except json.JSONDecodeError as e:
+            intents_logger.error(f"Failed to parse intents JSON for user {user_id}: {str(e)}\nResponse: {response_text}")
+            return {
+                "has_actionable_content": False,
+                "commitments": [],
+                "deadlines": [],
+                "context_updates": [],
+                "rescheduling": [],
+                "social_bets": [],
+                "mood": {"detected": False},
+                "energy": {"detected": False},
+                "progress_update": {"detected": False}
+            }
+            
+    except Exception as e:
+        intents_logger.error(f"Intent extraction failed for user {user_id}: {str(e)}", exc_info=True)
+        return {
+            "has_actionable_content": False,
+            "commitments": [],
+            "deadlines": [],
+            "context_updates": [],
+            "rescheduling": [],
+            "social_bets": [],
+            "mood": {"detected": False},
+            "energy": {"detected": False},
+            "progress_update": {"detected": False}
+        }
+
+
+async def process_intents(user_id: str, intents: dict, user_timezone: str) -> None:
+    """
+    Process extracted intents and insert them into appropriate Supabase tables.
+    
+    Handles: commitments → reminders, deadlines, context_updates, rescheduling,
+    social_bets, mood, energy, and progress updates with streak management.
+    
+    Args:
+        user_id: UUID of the user
+        intents: Dict returned from extract_intents()
+        user_timezone: User's timezone for timestamp conversion
+        
+    Error handling:
+        - Logs all database operations and errors
+        - Never crashes even if individual inserts fail
+        - Continues processing other intents if one fails
+    """
+    intents_logger.info(f"Processing intents for user {user_id}")
+    user_tz = pytz.timezone(user_timezone)
+    now_utc = datetime.now(pytz.UTC)
+    
+    try:
+        # Process commitments → reminders
+        for commitment in intents.get("commitments", []):
+            try:
+                scheduled_iso = commitment.get("scheduled_for_iso")
+                if scheduled_iso:
+                    scheduled_dt = datetime.fromisoformat(scheduled_iso.replace('Z', '+00:00'))
+                    
+                    reminder_data = {
+                        "user_id": user_id,
+                        "description": commitment.get("description"),
+                        "scheduled_for": scheduled_dt.isoformat(),
+                        "reminder_message": commitment.get("reminder_message"),
+                        "sent": False,
+                    }
+                    supabase.table("reminders").insert(reminder_data).execute()
+                    intents_logger.info(f"Inserted reminder for user {user_id}: {commitment.get('description')}")
+            except Exception as e:
+                intents_logger.error(f"Failed to insert reminder for user {user_id}: {str(e)}")
+                continue
+        
+        # Process deadlines
+        for deadline in intents.get("deadlines", []):
+            try:
+                deadline_data = {
+                    "user_id": user_id,
+                    "description": deadline.get("description"),
+                    "deadline_date": deadline.get("deadline_date_iso"),
+                    "daily_checkin": deadline.get("daily_checkin", True),
+                    "active": True,
+                }
+                supabase.table("deadlines").insert(deadline_data).execute()
+                intents_logger.info(f"Inserted deadline for user {user_id}: {deadline.get('description')}")
+            except Exception as e:
+                intents_logger.error(f"Failed to insert deadline for user {user_id}: {str(e)}")
+                continue
+        
+        # Process context updates
+        for context in intents.get("context_updates", []):
+            try:
+                expires_hours = context.get("expires_in_hours", 24)
+                expires_at = now_utc + timedelta(hours=expires_hours)
+                
+                context_data = {
+                    "user_id": user_id,
+                    "type": context.get("type"),
+                    "description": context.get("description"),
+                    "expires_at": expires_at.isoformat(),
+                }
+                supabase.table("user_context").insert(context_data).execute()
+                intents_logger.info(f"Inserted context update for user {user_id}: {context.get('type')}")
+            except Exception as e:
+                intents_logger.error(f"Failed to insert context update for user {user_id}: {str(e)}")
+                continue
+        
+        # Process rescheduling
+        for resched in intents.get("rescheduling", []):
+            try:
+                context_data = {
+                    "user_id": user_id,
+                    "type": "personal",
+                    "description": f"Rescheduled '{resched.get('original_goal')}' to {resched.get('new_time')}",
+                    "expires_at": (now_utc + timedelta(hours=48)).isoformat(),
+                }
+                supabase.table("user_context").insert(context_data).execute()
+                intents_logger.info(f"Inserted rescheduling context for user {user_id}")
+            except Exception as e:
+                intents_logger.error(f"Failed to insert rescheduling context for user {user_id}: {str(e)}")
+                continue
+        
+        # Process social bets
+        for bet in intents.get("social_bets", []):
+            try:
+                bet_data = {
+                    "user_id": user_id,
+                    "description": bet.get("description"),
+                    "target": bet.get("target"),
+                    "deadline": bet.get("deadline_iso"),
+                    "completed": False,
+                }
+                supabase.table("social_bets").insert(bet_data).execute()
+                intents_logger.info(f"Inserted social bet for user {user_id}: {bet.get('description')}")
+            except Exception as e:
+                intents_logger.error(f"Failed to insert social bet for user {user_id}: {str(e)}")
+                continue
+        
+        # Process mood
+        if intents.get("mood", {}).get("detected"):
+            try:
+                mood_info = intents.get("mood", {})
+                context_data = {
+                    "user_id": user_id,
+                    "type": "mood",
+                    "description": f"Mood: {mood_info.get('level')}. {mood_info.get('reason', '')}",
+                    "expires_at": (now_utc + timedelta(hours=24)).isoformat(),
+                }
+                supabase.table("user_context").insert(context_data).execute()
+                intents_logger.info(f"Inserted mood context for user {user_id}: {mood_info.get('level')}")
+            except Exception as e:
+                intents_logger.error(f"Failed to insert mood context for user {user_id}: {str(e)}")
+        
+        # Process energy
+        if intents.get("energy", {}).get("detected"):
+            try:
+                energy_info = intents.get("energy", {})
+                context_data = {
+                    "user_id": user_id,
+                    "type": "energy",
+                    "description": f"Energy: {energy_info.get('level')}. {energy_info.get('reason', '')}",
+                    "expires_at": (now_utc + timedelta(hours=12)).isoformat(),
+                }
+                supabase.table("user_context").insert(context_data).execute()
+                intents_logger.info(f"Inserted energy context for user {user_id}: {energy_info.get('level')}")
+            except Exception as e:
+                intents_logger.error(f"Failed to insert energy context for user {user_id}: {str(e)}")
+        
+        # Process progress updates
+        if intents.get("progress_update", {}).get("detected"):
+            try:
+                progress = intents.get("progress_update", {})
+                context_data = {
+                    "user_id": user_id,
+                    "type": "win",
+                    "description": f"Achieved: {progress.get('achievement')}. {progress.get('metric', '')}",
+                    "expires_at": (now_utc + timedelta(hours=72)).isoformat(),
+                }
+                supabase.table("user_context").insert(context_data).execute()
+                intents_logger.info(f"Inserted progress update for user {user_id}: {progress.get('achievement')}")
+                
+                # Update streak if goal_id can be determined
+                goal_name = progress.get("goal", "").lower()
+                goals_res = supabase.table("goals").select("id, activity").eq("user_id", user_id).execute()
+                for goal in goals_res.data or []:
+                    if goal_name in goal.get("activity", "").lower():
+                        streak = await update_streak(user_id, goal["id"])
+                        intents_logger.info(f"Updated streak for goal {goal['id']}: {streak}")
+                        break
+            except Exception as e:
+                intents_logger.error(f"Failed to process progress update for user {user_id}: {str(e)}")
+        
+        intents_logger.info(f"Finished processing intents for user {user_id}")
+        
+    except Exception as e:
+        intents_logger.error(f"Critical error processing intents for user {user_id}: {str(e)}", exc_info=True)
+
+
+async def get_active_context(user_id: str) -> str:
+    """
+    Fetch all active context for a user and format for injection into system prompt.
+    
+    Returns context entries where expires_at > now.
+    
+    Args:
+        user_id: UUID of the user
+        
+    Returns:
+        Formatted string like:
+        'ACTIVE USER CONTEXT — factor this naturally into your response:
+        mood: feeling great after finishing the project
+        energy: low because bad sleep'
+        
+        Or empty string if no active context.
+    """
+    try:
+        now_utc = datetime.now(pytz.UTC)
+        context_res = (
+            supabase.table("user_context")
+            .select("*")
+            .eq("user_id", user_id)
+            .gt("expires_at", now_utc.isoformat())
+            .execute()
+        )
+        
+        if not context_res.data:
+            return ""
+        
+        context_lines = ["ACTIVE USER CONTEXT — factor this naturally into your response without explicitly referencing that you remember it:"]
+        for ctx in context_res.data:
+            line = f"{ctx['type']}: {ctx['description']}"
+            context_lines.append(line)
+        
+        return "\n".join(context_lines)
+        
+    except Exception as e:
+        logger.warning(f"Failed to get active context for user {user_id}: {str(e)}")
+        return ""
+
+
+async def get_upcoming_reminders_preview(user_id: str) -> str:
+    """
+    Get upcoming unsent reminders scheduled within next 6 hours.
+    
+    Args:
+        user_id: UUID of the user
+        
+    Returns:
+        Formatted string like:
+        'UPCOMING REMINDERS: Call mom (in 2 hours), Submit project (in 4 hours)'
+        
+        Or empty string if no upcoming reminders.
+    """
+    try:
+        now_utc = datetime.now(pytz.UTC)
+        six_hours_later = now_utc + timedelta(hours=6)
+        
+        reminders_res = (
+            supabase.table("reminders")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("sent", False)
+            .gte("scheduled_for", now_utc.isoformat())
+            .lte("scheduled_for", six_hours_later.isoformat())
+            .execute()
+        )
+        
+        if not reminders_res.data:
+            return ""
+        
+        reminder_items = []
+        for reminder in reminders_res.data:
+            scheduled = datetime.fromisoformat(reminder["scheduled_for"].replace('Z', '+00:00'))
+            hours_remaining = int((scheduled - now_utc).total_seconds() / 3600)
+            item = f"{reminder['description']} (in {hours_remaining} hours)"
+            reminder_items.append(item)
+        
+        return f"UPCOMING REMINDERS: {', '.join(reminder_items)}"
+        
+    except Exception as e:
+        logger.warning(f"Failed to get upcoming reminders for user {user_id}: {str(e)}")
+        return ""
+
+
+async def update_streak(user_id: str, goal_id: str) -> dict:
+    """
+    Update or create a streak entry for a user's goal.
+    
+    Logic:
+    - If no streak exists: create with current_streak=1, longest_streak=1
+    - If last_checkin was yesterday: increment current_streak
+    - If last_checkin was before yesterday: reset current_streak to 1
+    - Update longest_streak if current exceeds it
+    - Check for milestone hits (3, 7, 14, 30, 60, 100)
+    
+    Args:
+        user_id: UUID of the user
+        goal_id: UUID of the goal
+        
+    Returns:
+        Dict with: current_streak, longest_streak, milestone_hit (bool), milestone_number (int or None)
+        
+    Error handling:
+        - Logs all operations
+        - Returns empty dict if operation fails
+    """
+    try:
+        today = datetime.now().date()
+        
+        # Fetch existing streak
+        streak_res = (
+            supabase.table("streaks")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("goal_id", goal_id)
+            .execute()
+        )
+        
+        if not streak_res.data:
+            # Create new streak
+            streak_data = {
+                "user_id": user_id,
+                "goal_id": goal_id,
+                "current_streak": 1,
+                "longest_streak": 1,
+                "last_checkin": today.isoformat(),
+            }
+            supabase.table("streaks").insert(streak_data).execute()
+            streaks_logger.info(f"Created new streak for user {user_id}, goal {goal_id}")
+            return {
+                "current_streak": 1,
+                "longest_streak": 1,
+                "milestone_hit": False,
+                "milestone_number": None,
+            }
+        
+        streak = streak_res.data[0]
+        last_checkin = datetime.fromisoformat(streak["last_checkin"]).date() if streak.get("last_checkin") else None
+        
+        current_streak = streak.get("current_streak", 0)
+        longest_streak = streak.get("longest_streak", 0)
+        
+        # Determine new streak count
+        if last_checkin == today:
+            # Already checked in today, don't increment
+            pass
+        elif last_checkin == today - timedelta(days=1):
+            # Last checkin was yesterday, continue streak
+            current_streak += 1
+        else:
+            # Broke the streak
+            current_streak = 1
+        
+        # Update longest streak if needed
+        if current_streak > longest_streak:
+            longest_streak = current_streak
+        
+        # Check for milestones
+        milestones = [3, 7, 14, 30, 60, 100]
+        milestone_hit = current_streak in milestones
+        
+        # Update database
+        update_data = {
+            "current_streak": current_streak,
+            "longest_streak": longest_streak,
+            "last_checkin": today.isoformat(),
+            "updated_at": datetime.now(pytz.UTC).isoformat(),
+        }
+        supabase.table("streaks").update(update_data).eq("id", streak["id"]).execute()
+        
+        streaks_logger.info(
+            f"Updated streak for user {user_id}, goal {goal_id}: "
+            f"current={current_streak}, longest={longest_streak}, milestone={milestone_hit}"
+        )
+        
+        return {
+            "current_streak": current_streak,
+            "longest_streak": longest_streak,
+            "milestone_hit": milestone_hit,
+            "milestone_number": current_streak if milestone_hit else None,
+        }
+        
+    except Exception as e:
+        streaks_logger.error(f"Failed to update streak for user {user_id}, goal {goal_id}: {str(e)}", exc_info=True)
+        return {}
+
+
+async def get_message_history(user_id: str, limit: int = 20) -> list:
+    """
+    Fetch recent message history for a user.
+    
+    Args:
+        user_id: UUID of the user
+        limit: How many messages to fetch (default 20)
+        
+    Returns:
+        List of messages in conversation order (oldest first)
+    """
+    try:
+        messages_res = (
+            supabase.table("messages")
+            .select("direction, body, created_at")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        
+        # Reverse to get chronological order (oldest first)
+        return list(reversed(messages_res.data or []))
+        
+    except Exception as e:
+        logger.warning(f"Failed to get message history for user {user_id}: {str(e)}")
+        return []
+
+
+async def generate_gemini_response(
+    system_prompt: str,
+    message_history: list,
+    new_message: str,
+) -> str:
+    """
+    Generate a response using Gemini 1.5 Flash with full conversation context.
+    
+    Args:
+        system_prompt: System instruction for the coach personality
+        message_history: List of recent messages [{"direction": "inbound/outbound", "body": "...", "created_at": "..."}]
+        new_message: The latest incoming message
+        
+    Returns:
+        Generated response text
+        
+    Error handling:
+        - Logs errors and returns fallback message
+    """
+    try:
+        # Build Gemini chat history
+        gemini_history = []
+        for msg in message_history:
+            role = "user" if msg["direction"] == "inbound" else "model"
+            gemini_history.append({"role": role, "parts": [msg["body"]]})
+        
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=system_prompt,
+        )
+        
+        chat = model.start_chat(history=gemini_history)
+        response = chat.send_message(new_message)
+        text = response.text.strip()
+        
+        logger.info(f"Generated Gemini response: {text[:60]}...")
+        return text
+        
+    except Exception as e:
+        logger.error(f"Gemini response generation failed: {str(e)}", exc_info=True)
+        return "got it 👊"
+
+
+
 
 
 # ---------------------------------------------------------------------------

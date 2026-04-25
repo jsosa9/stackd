@@ -1,6 +1,7 @@
 import logging
 import os
 import secrets
+import asyncio
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Request, Response, HTTPException
 from pydantic import BaseModel
@@ -10,7 +11,14 @@ from twilio.rest import Client as TwilioClient
 from supabase import create_client
 from dotenv import load_dotenv
 
-from routes.ai import generate_checkin_text
+from routes.ai import (
+    generate_checkin_text,
+    extract_intents,
+    process_intents,
+    get_active_context,
+    get_message_history,
+    generate_gemini_response,
+)
 
 load_dotenv()
 
@@ -125,37 +133,41 @@ async def _generate_reply(user_id: str, inbound_text: str) -> str:
 async def sms_incoming(request: Request):
     """
     Twilio webhook: called every time a user replies to a text.
-
-    Flow:
-      1. Validate request came from Twilio (skipped in development)
-      2. Parse From number and message body
-      3. Look up user by phone — reply with registration prompt if not found
-      4. Save inbound message to messages table
-      5. Fetch generated_system_prompt + last 10 messages
-      6. Call Gemini Flash 1.5 with full context
-      7. Save outbound response to messages table
-      8. Send response via Twilio (TwiML)
-      9. Return 200 to Twilio
+    
+    NEW FLOW (with intent detection):
+    1. Validate request came from Twilio (skipped in development)
+    2. Parse From number and message body
+    3. Look up user by phone, including coach_settings and schedule
+    4. Save inbound message to messages table
+    5. Launch intent extraction as a background task (doesn't block response)
+    6. Fetch generated_system_prompt, active context, and message history
+    7. Call Gemini Flash 1.5 with full context to generate response
+    8. Save outbound response to messages table
+    9. Send response via Twilio
+    10. Wait for intent extraction to complete and process results
+    11. Return 200 to Twilio
+    
+    Key: Intent extraction runs concurrently with response generation for zero latency impact.
     """
     form_data = await request.form()
     url = str(request.url)
     signature = request.headers.get("X-Twilio-Signature", "")
 
-    # Validate Twilio signature in production to prevent spoofed requests
+    # Validate Twilio signature in production
     if os.getenv("ENV", "development") != "development":
         if not validator.validate(url, dict(form_data), signature):
             logger.warning("Invalid Twilio signature — rejecting request")
             raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
     from_number = form_data.get("From", "").strip()
-    body = form_data.get("Body", "").strip()
+    message_body = form_data.get("Body", "").strip()
 
-    logger.info(f"Inbound SMS from {from_number}: {body[:80]}")
+    logger.info(f"Inbound SMS from {from_number}: {message_body[:80]}")
 
-    # Look up user by phone number
+    # Look up user by phone number with schedule and coach settings
     user_res = (
         supabase.table("users")
-        .select("id, name, phone")
+        .select("*, schedule(*), coach_settings(*)")
         .eq("phone", from_number)
         .execute()
     )
@@ -167,29 +179,82 @@ async def sms_incoming(request: Request):
             "Head to our app to get started and set up your AI coach!"
         )
 
-    user = user_res.data[0]
-    user_id = user["id"]
+    user_data = user_res.data[0]
+    user_id = user_data["id"]
+    user_timezone = user_data.get("schedule", {}).get("timezone", "America/New_York")
 
-    # Save the inbound message
-    _save_message(user_id, "inbound", body)
+    # Save inbound message
+    _save_message(user_id, "inbound", message_body)
 
-    # Generate AI coach reply using stored system prompt + conversation history
+    # Launch intent extraction as a concurrent task (don't await yet)
+    intents_task = asyncio.create_task(
+        extract_intents(user_id, message_body, user_timezone)
+    )
+
+    # Get active context and message history while intent extraction runs
     try:
-        reply = await _generate_reply(user_id, body)
-    except Exception:
+        active_context, message_history = await asyncio.gather(
+            get_active_context(user_id),
+            get_message_history(user_id, limit=20)
+        )
+    except Exception as e:
+        logger.warning(f"Failed to fetch context/history for user {user_id}: {str(e)}")
+        active_context = ""
+        message_history = []
+
+    # Fetch generated system prompt
+    coach_res = (
+        supabase.table("coach_settings")
+        .select("generated_system_prompt")
+        .eq("user_id", user_id)
+        .execute()
+    )
+    
+    if not coach_res.data or not coach_res.data[0].get("generated_system_prompt"):
+        # Fallback: build it on the fly (should be rare)
+        from routes.ai import build_coach_personality
+        system_prompt = await build_coach_personality(user_id)
+    else:
+        system_prompt = coach_res.data[0]["generated_system_prompt"]
+
+    # Inject active context into system prompt
+    from routes.ai import HUMAN_BEHAVIOR_RULES
+    if active_context:
+        system_prompt = f"{system_prompt}\n\n{active_context}\n\n{HUMAN_BEHAVIOR_RULES}"
+
+    # Generate response using Gemini with full context awareness
+    try:
+        response_text = await generate_gemini_response(
+            system_prompt=system_prompt,
+            message_history=message_history,
+            new_message=message_body
+        )
+    except Exception as e:
         logger.exception(f"Failed to generate reply for user {user_id}")
-        reply = (
-            f"Hey {user.get('name', 'there')}! Got your message — "
+        response_text = (
+            f"Hey {user_data.get('name', 'there')}! Got your message — "
             "I'm having a quick moment but I'll be right back with you. 💪"
         )
 
-    # Save the outbound message
-    _save_message(user_id, "outbound", reply)
+    # Save outbound message
+    _save_message(user_id, "outbound", response_text)
 
-    logger.info(f"Outbound SMS to {from_number}: {reply[:80]}")
+    logger.info(f"Outbound SMS to {from_number}: {response_text[:80]}")
 
-    # Return TwiML response (Twilio reads this and sends the SMS)
-    return _twiml_reply(reply)
+    # Prepare TwiML response to send back to Twilio immediately
+    twiml_response = _twiml_reply(response_text)
+
+    # Now wait for intent extraction to complete and process results
+    try:
+        intents = await intents_task
+        if intents.get("has_actionable_content"):
+            await process_intents(user_id, intents, user_timezone)
+            logger.info(f"Processed intents for user {user_id}")
+    except Exception as e:
+        logger.error(f"Failed to process intents for user {user_id}: {str(e)}", exc_info=True)
+        # Don't crash the SMS response — intents are background processing
+
+    return twiml_response
 
 
 # ---------------------------------------------------------------------------
