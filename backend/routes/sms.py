@@ -1,9 +1,9 @@
 import logging
 import os
+import re
 import secrets
-import asyncio
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Request, Response, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Request, Response, HTTPException
 from pydantic import BaseModel
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.request_validator import RequestValidator
@@ -11,14 +11,9 @@ from twilio.rest import Client as TwilioClient
 from supabase import create_client
 from dotenv import load_dotenv
 
-from routes.ai import (
-    generate_checkin_text,
-    extract_intents,
-    process_intents,
-    get_active_context,
-    get_message_history,
-    generate_gemini_response,
-)
+from routes.ai import generate_notification_response
+from services.message_router import process_inbound_sms
+from services.onboarding import handle_onboarding
 
 load_dotenv()
 
@@ -54,6 +49,11 @@ validator = RequestValidator(os.getenv("TWILIO_AUTH_TOKEN"))
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _extract_link_token(body: str) -> str | None:
+    cleaned = body.strip().upper()
+    return cleaned if re.match(r'^STK-[A-Z0-9]{4}$', cleaned) else None
+
+
 def _twiml_reply(message: str) -> Response:
     """Return a TwiML XML response that sends an SMS back to the user."""
     twiml = MessagingResponse()
@@ -73,56 +73,119 @@ def _save_message(user_id: str, direction: str, body: str) -> None:
         logger.exception(f"Failed to save {direction} message for user {user_id}")
 
 
-async def _generate_reply(user_id: str, inbound_text: str) -> str:
-    """
-    Build a reply using the user's generated system prompt and the last 10 messages
-    as conversation history, then call Gemini Flash via generate_checkin_text.
-    We re-use generate_checkin_text with the inbound message as the "goal" context
-    because it already handles history + system prompt correctly.
-    """
-    import google.generativeai as genai
+# ---------------------------------------------------------------------------
+# Activity notification reply helpers
+# ---------------------------------------------------------------------------
 
-    # Fetch the saved system prompt
+_CONFIRMED_PATTERNS = re.compile(
+    r"\b(yes|yeah|yep|yup|sure|definitely|absolutely|im in|i'm in|let'?s go|letsgo|ok|okay|yea|yass)\b",
+    re.IGNORECASE,
+)
+_DECLINED_PATTERNS = re.compile(
+    r"\b(no|nope|nah|can'?t|cannot|skip|not today|not gonna|won'?t|wont|pass|bail)\b",
+    re.IGNORECASE,
+)
+_RESCHEDULE_PATTERNS = re.compile(
+    r"\b(reschedule|tomorrow|later|move|shift|delay|another time|push|soon)\b"
+    r"|\b(\d{1,2}:\d{2})\b"   # time like "3:30"
+    r"|\b(\d{1,2}\s*(am|pm))\b",  # time like "3pm"
+    re.IGNORECASE,
+)
+
+def parse_notification_reply(body: str) -> str | None:
+    """
+    Parse an SMS body into a notification state.
+    Returns 'CONFIRMED', 'DECLINED', 'RESCHEDULED', or None if unrecognised.
+    Reschedule is checked last so "yes, reschedule me to 3pm" → RESCHEDULED.
+    """
+    text = body.strip()
+    if _RESCHEDULE_PATTERNS.search(text):
+        return "RESCHEDULED"
+    if _CONFIRMED_PATTERNS.search(text):
+        return "CONFIRMED"
+    if _DECLINED_PATTERNS.search(text):
+        return "DECLINED"
+    return None
+
+
+def _extract_reschedule_time(body: str) -> str:
+    """Pull a time string from the reply text, or return empty string."""
+    # Look for HH:MM
+    m = re.search(r"\b(\d{1,2}:\d{2})\s*(am|pm)?\b", body, re.IGNORECASE)
+    if m:
+        t = m.group(1)
+        ampm = m.group(2) or ""
+        return f"{t} {ampm}".strip()
+    # Look for bare "3pm"
+    m2 = re.search(r"\b(\d{1,2})\s*(am|pm)\b", body, re.IGNORECASE)
+    if m2:
+        return f"{m2.group(1)} {m2.group(2)}"
+    # Natural language
+    for word in ("tomorrow", "later", "tonight", "morning", "afternoon", "evening"):
+        if word.lower() in body.lower():
+            return word.capitalize()
+    return ""
+
+
+async def handle_notification_reply(
+    user_id: str,
+    user_data: dict,
+    notif: dict,
+    state: str,
+    reply_text: str,
+) -> str:
+    """
+    Update the activity_notifications row to the new state, then generate
+    and return a personality-aware coach response.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rescheduled_to = _extract_reschedule_time(reply_text) if state == "RESCHEDULED" else ""
+
+    update_payload: dict = {
+        "state": state,
+        "replied_at": now_iso,
+        "reply_text": reply_text,
+        "updated_at": now_iso,
+    }
+    if rescheduled_to:
+        update_payload["rescheduled_to"] = rescheduled_to
+
+    try:
+        supabase.table("activity_notifications").update(update_payload).eq("id", notif["id"]).execute()
+    except Exception:
+        logger.exception(f"Failed to update activity_notifications row {notif['id']}")
+
+    # Fetch coach settings for personality
     coach_res = (
         supabase.table("coach_settings")
-        .select("generated_system_prompt")
+        .select("generated_system_prompt, coach_personality, coach_intensity")
         .eq("user_id", user_id)
         .execute()
     )
-    if not coach_res.data or not coach_res.data[0].get("generated_system_prompt"):
-        # Fallback: build it on the fly (should not normally happen)
-        from routes.ai import build_coach_personality
-        system_prompt = await build_coach_personality(user_id)
-    else:
-        system_prompt = coach_res.data[0]["generated_system_prompt"]
+    coach = coach_res.data[0] if coach_res.data else {}
 
-    # Fetch last 10 messages (oldest first for chronological context)
-    msgs_res = (
-        supabase.table("messages")
-        .select("direction, body")
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(10)
-        .execute()
+    # Format scheduled time as 12h for context
+    time_str = notif.get("scheduled_time", "")
+    scheduled_time_12h = ""
+    if time_str:
+        try:
+            h, m = map(int, time_str.split(":"))
+            period = "AM" if h < 12 else "PM"
+            h12 = h % 12 or 12
+            scheduled_time_12h = f"{h12}:{str(m).zfill(2)} {period}"
+        except Exception:
+            pass
+
+    return await generate_notification_response(
+        state=state,
+        activity=notif["activity"],
+        user_name=user_data.get("name") or "there",
+        system_prompt=coach.get("generated_system_prompt", ""),
+        coach_personality=coach.get("coach_personality") or "hype",
+        coach_intensity=coach.get("coach_intensity") or 3,
+        scheduled_time_12h=scheduled_time_12h,
+        rescheduled_to=rescheduled_to,
     )
-    history = list(reversed(msgs_res.data or []))
-
-    # Build Gemini history — inbound = "user", outbound = "model"
-    gemini_history = [
-        {
-            "role": "user" if m["direction"] == "inbound" else "model",
-            "parts": [m["body"]],
-        }
-        for m in history
-    ]
-
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction=system_prompt,
-    )
-    chat = model.start_chat(history=gemini_history)
-    response = chat.send_message(inbound_text)
-    return response.text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -130,24 +193,21 @@ async def _generate_reply(user_id: str, inbound_text: str) -> str:
 # ---------------------------------------------------------------------------
 
 @router.post("/incoming")
-async def sms_incoming(request: Request):
+async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
     """
-    Twilio webhook: called every time a user replies to a text.
-    
-    NEW FLOW (with intent detection):
-    1. Validate request came from Twilio (skipped in development)
-    2. Parse From number and message body
-    3. Look up user by phone, including coach_settings and schedule
-    4. Save inbound message to messages table
-    5. Launch intent extraction as a background task (doesn't block response)
-    6. Fetch generated_system_prompt, active context, and message history
-    7. Call Gemini Flash 1.5 with full context to generate response
-    8. Save outbound response to messages table
-    9. Send response via Twilio
-    10. Wait for intent extraction to complete and process results
-    11. Return 200 to Twilio
-    
-    Key: Intent extraction runs concurrently with response generation for zero latency impact.
+    Twilio webhook — thin wrapper around process_inbound_sms().
+
+    Responsibilities here:
+      1. Twilio signature validation
+      2. Parse From number and Body
+      3. Link token intercept (STK-XXXX activation)
+      4. User lookup by phone number
+      5. Unknown number handling
+      6. Save inbound message
+      7. Notification reply intercept (CONFIRMED/DECLINED/RESCHEDULED)
+      8. Delegate to process_inbound_sms() for all routing/classification/voice
+      9. Save outbound message
+     10. Return TwiML reply
     """
     form_data = await request.form()
     url = str(request.url)
@@ -164,6 +224,77 @@ async def sms_incoming(request: Request):
 
     logger.info(f"Inbound SMS from {from_number}: {message_body[:80]}")
 
+    # Link token intercept — handle STK-XXXX activation before normal user lookup
+    link_token = _extract_link_token(message_body)
+    if link_token:
+        try:
+            row = (
+                supabase.table("phone_link_tokens")
+                .select("user_id, used, expires_at")
+                .eq("token", link_token)
+                .eq("used", False)
+                .execute()
+            )
+            if row.data:
+                entry = row.data[0]
+                if entry["expires_at"] > datetime.now(timezone.utc).isoformat():
+                    uid = entry["user_id"]
+                    supabase.table("users").update({"phone": from_number}).eq("id", uid).execute()
+                    supabase.table("phone_link_tokens").update({"used": True}).eq("token", link_token).execute()
+                    from routes.mock import send_welcome_message
+                    welcome = await send_welcome_message(uid)
+                    return _twiml_reply(welcome)
+        except Exception:
+            logger.exception(f"Link token activation failed for token {link_token}")
+        return _twiml_reply("That code wasn't recognized. Try again or visit the app.")
+
+    # STOP / START keyword intercept — must run before user lookup and onboarding
+    _msg_upper = message_body.strip().upper()
+
+    if _msg_upper == "STOP":
+        try:
+            _stop_res = supabase.table("users").select("id").eq("phone", from_number).execute()
+            if _stop_res.data:
+                uid = _stop_res.data[0]["id"]
+                token = "STK-" + "".join(
+                    secrets.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for _ in range(4)
+                )
+                expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+                supabase.table("phone_link_tokens").insert({
+                    "user_id": uid,
+                    "token": token,
+                    "used": False,
+                    "expires_at": expires_at,
+                }).execute()
+                logger.info(f"STOP token {token} created for {from_number}")
+                return _twiml_reply(
+                    f"To unsubscribe tap this link. "
+                    f"It expires in 24 hours.\n"
+                    f"stackd.chat/unsubscribe?token={token}"
+                )
+        except Exception:
+            logger.exception(f"Failed to create unsubscribe token for {from_number}")
+        return _twiml_reply(
+            "To unsubscribe email support@stackd.chat with your phone number."
+        )
+
+    if _msg_upper in ("START", "UNSTOP"):
+        try:
+            _start_res = supabase.table("users").select("id").eq("phone", from_number).execute()
+            if _start_res.data:
+                supabase.table("users").update({"paused": False}).eq("phone", from_number).execute()
+                logger.info(f"User {from_number} resubscribed via {_msg_upper}")
+        except Exception:
+            logger.exception(f"Failed to unpause user {from_number} on {_msg_upper}")
+        return _twiml_reply(
+            "You have been resubscribed to stackd. "
+            "Your coach will resume texting you. "
+            "Text STOP at any time to unsubscribe."
+        )
+
+    if _msg_upper == "HELP":
+        return _twiml_reply("stackd Help\nstackd.chat/help")
+
     # Look up user by phone number with schedule and coach settings
     user_res = (
         supabase.table("users")
@@ -172,91 +303,71 @@ async def sms_incoming(request: Request):
         .execute()
     )
 
-    if not user_res.data:
-        logger.info(f"Unknown number {from_number} — sending registration prompt")
-        return _twiml_reply(
-            "Hey! 👋 Looks like this number isn't linked to a stackd account yet. "
-            "Head to our app to get started and set up your AI coach!"
-        )
+    user_data = user_res.data[0] if user_res.data else None
 
-    user_data = user_res.data[0]
+    # Onboarding intercept — handles new users and users mid-onboarding (step < 5)
+    if user_data is None or user_data.get("onboarding_step", 5) < 5:
+        onboarding_reply = await handle_onboarding(
+            from_number, message_body, background_tasks, supabase, user_data
+        )
+        if onboarding_reply is not None:
+            return _twiml_reply(onboarding_reply)
+        # If None returned, onboarding is complete — fall through to normal pipeline
+        # Re-fetch user_data in case it was just created
+        if user_data is None:
+            user_res2 = supabase.table("users").select("*, schedule(*), coach_settings(*)").eq("phone", from_number).execute()
+            user_data = user_res2.data[0] if user_res2.data else None
+        if user_data is None:
+            return _twiml_reply("Something went wrong. Try again.")
+
     user_id = user_data["id"]
-    user_timezone = user_data.get("schedule", {}).get("timezone", "America/New_York")
+    user_timezone = (user_data.get("schedule") or {}).get("timezone", "America/New_York")
 
     # Save inbound message
     _save_message(user_id, "inbound", message_body)
 
-    # Launch intent extraction as a concurrent task (don't await yet)
-    intents_task = asyncio.create_task(
-        extract_intents(user_id, message_body, user_timezone)
-    )
-
-    # Get active context and message history while intent extraction runs
+    # ── Notification reply intercept ────────────────────────────────────────
+    # Check if there's an open NOTIFIED activity_notifications row for this user.
+    # If the reply parses to a known state, handle it and short-circuit Gemini.
     try:
-        active_context, message_history = await asyncio.gather(
-            get_active_context(user_id),
-            get_message_history(user_id, limit=20)
+        pending_res = (
+            supabase.table("activity_notifications")
+            .select("id, activity, scheduled_time")
+            .eq("user_id", user_id)
+            .eq("state", "NOTIFIED")
+            .order("notified_at", desc=True)
+            .limit(1)
+            .execute()
         )
-    except Exception as e:
-        logger.warning(f"Failed to fetch context/history for user {user_id}: {str(e)}")
-        active_context = ""
-        message_history = []
+        if pending_res.data:
+            notif_state = parse_notification_reply(message_body)
+            if notif_state:
+                notif_row = pending_res.data[0]
+                response_text = await handle_notification_reply(
+                    user_id, user_data, notif_row, notif_state, message_body
+                )
+                _save_message(user_id, "outbound", response_text)
+                logger.info(
+                    f"Notification reply {notif_state} for {notif_row['activity']} "
+                    f"from {from_number}: {response_text[:80]}"
+                )
+                return _twiml_reply(response_text)
+    except Exception:
+        logger.exception(f"Notification reply intercept failed for user {user_id} — falling through to Gemini")
 
-    # Fetch generated system prompt
-    coach_res = (
-        supabase.table("coach_settings")
-        .select("generated_system_prompt")
-        .eq("user_id", user_id)
-        .execute()
-    )
-    
-    if not coach_res.data or not coach_res.data[0].get("generated_system_prompt"):
-        # Fallback: build it on the fly (should be rare)
-        from routes.ai import build_coach_personality
-        system_prompt = await build_coach_personality(user_id)
-    else:
-        system_prompt = coach_res.data[0]["generated_system_prompt"]
-
-    # Inject active context into system prompt
-    from routes.ai import HUMAN_BEHAVIOR_RULES, CONVICTION_RULES
-    if active_context:
-        system_prompt = f"{system_prompt}\n\n{active_context}\n\n{HUMAN_BEHAVIOR_RULES}\n\n{CONVICTION_RULES}"
-    else:
-        system_prompt = f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}\n\n{CONVICTION_RULES}"
-
-    # Generate response using Gemini with full context awareness
+    # Delegate to the shared pipeline — classification, routing, handlers, voice all live there
     try:
-        response_text = await generate_gemini_response(
-            system_prompt=system_prompt,
-            message_history=message_history,
-            new_message=message_body
-        )
-    except Exception as e:
-        logger.exception(f"Failed to generate reply for user {user_id}")
+        response_text = await process_inbound_sms(user_id, message_body, user_timezone=user_timezone)
+    except Exception:
+        logger.exception(f"process_inbound_sms failed for user {user_id}")
         response_text = (
             f"Hey {user_data.get('name', 'there')}! Got your message — "
             "I'm having a quick moment but I'll be right back with you. 💪"
         )
 
-    # Save outbound message
     _save_message(user_id, "outbound", response_text)
-
     logger.info(f"Outbound SMS to {from_number}: {response_text[:80]}")
-
-    # Prepare TwiML response to send back to Twilio immediately
-    twiml_response = _twiml_reply(response_text)
-
-    # Now wait for intent extraction to complete and process results
-    try:
-        intents = await intents_task
-        if intents.get("has_actionable_content"):
-            await process_intents(user_id, intents, user_timezone)
-            logger.info(f"Processed intents for user {user_id}")
-    except Exception as e:
-        logger.error(f"Failed to process intents for user {user_id}: {str(e)}", exc_info=True)
-        # Don't crash the SMS response — intents are background processing
-
-    return twiml_response
+    return _twiml_reply(response_text)
 
 
 # ---------------------------------------------------------------------------

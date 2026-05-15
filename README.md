@@ -10,7 +10,7 @@ Build habits that stick with your personal AI-powered SMS accountability coach.
 | Backend | Python, FastAPI |
 | Database & Auth | Supabase (PostgreSQL + Realtime + Google OAuth) |
 | SMS | Twilio |
-| AI | Anthropic Claude API |
+| AI | Gemini 2.5 Flash Lite |
 | Frontend Hosting | Vercel |
 | Backend Hosting | Railway |
 
@@ -37,7 +37,7 @@ stackd/
 │   │   ├── users.py       # Onboarding endpoint
 │   │   ├── sms.py         # Twilio webhook
 │   │   ├── scheduler.py   # Cron jobs
-│   │   └── ai.py          # Anthropic API
+│   │   └── ai.py          # Gemini 2.5 Flash Lite API
 │   ├── models/user.py
 │   ├── requirements.txt
 │   └── railway.toml
@@ -61,9 +61,9 @@ stackd/
 2. Get a phone number
 3. Set the webhook URL to `https://your-railway-url/sms/webhook`
 
-### 3. Anthropic
+### 3. Gemini 2.5 lite
 
-1. Get an API key at [console.anthropic.com](https://console.anthropic.com)
+1. Get an API key at [console.Gemini 2.5 lite.com](https://console.Gemini 2.5 lite.com)
 
 ### 4. Backend (local)
 
@@ -121,7 +121,7 @@ Add environment variables in Vercel dashboard:
 | `TWILIO_ACCOUNT_SID` | Twilio account SID |
 | `TWILIO_AUTH_TOKEN` | Twilio auth token |
 | `TWILIO_PHONE_NUMBER` | Your Twilio phone number |
-| `ANTHROPIC_API_KEY` | Anthropic API key |
+| `Gemini 2.5 lite_API_KEY` | Gemini 2.5 lite API key |
 | `FRONTEND_URL` | Frontend URL for CORS |
 
 ### Frontend (`frontend/.env.local`)

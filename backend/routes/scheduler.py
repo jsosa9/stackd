@@ -10,7 +10,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
 from dotenv import load_dotenv
-from anthropic import Anthropic
 import google.generativeai as genai
 
 load_dotenv()
@@ -138,7 +137,7 @@ def send_scheduled_checkins() -> None:
 
     # Fetch all users with their schedule preferences joined
     schedules_res = supabase.table("schedule").select(
-        "user_id, checkin_time, timezone, users(id, phone, name)"
+        "user_id, checkin_time, timezone, users(id, phone, name, paused)"
     ).execute()
 
     now_utc = datetime.utcnow()
@@ -146,6 +145,8 @@ def send_scheduled_checkins() -> None:
     for sched in schedules_res.data or []:
         user = sched.get("users")
         if not user or not user.get("phone"):
+            continue
+        if user.get("paused"):
             continue
 
         user_id = user["id"]
@@ -170,9 +171,10 @@ def send_scheduled_checkins() -> None:
         if local_now.hour != checkin_hour or local_now.minute != checkin_minute:
             continue  # Not their check-in time yet
 
-        # Get goals scheduled for today's day of week (0=Mon … 6=Sun)
-        day_abbrevs = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        today = day_abbrevs[local_now.weekday()]
+        # Get goals scheduled for today's day of week.
+        # days[] stored as full lowercase: "monday", "tuesday", …
+        day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        today = day_names[local_now.weekday()]
 
         goals_res = supabase.table("goals").select("activity, days").eq("user_id", user_id).execute()
         todays_goals = [
@@ -225,7 +227,7 @@ def send_motivation_messages() -> None:
     schedules_res = supabase.table("schedule").select(
         "user_id, motivation_enabled, motivation_frequency, "
         "motivation_window_start, motivation_window_end, timezone, "
-        "users(id, phone, name)"
+        "users(id, phone, name, paused)"
     ).eq("motivation_enabled", True).execute()
 
     now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
@@ -233,6 +235,8 @@ def send_motivation_messages() -> None:
     for sched in schedules_res.data or []:
         user = sched.get("users")
         if not user or not user.get("phone"):
+            continue
+        if user.get("paused"):
             continue
 
         user_id = user["id"]
@@ -404,6 +408,8 @@ def send_deadline_checkins() -> None:
             
             try:
                 # Calculate days remaining
+                if not deadline.get("deadline_date"):
+                    continue
                 deadline_date = datetime.strptime(deadline["deadline_date"], "%Y-%m-%d").date()
                 days_remaining = (deadline_date - date.today()).days
                 
@@ -421,7 +427,7 @@ def send_deadline_checkins() -> None:
                 
                 # Generate deadline check-in with Gemini
                 model = genai.GenerativeModel(
-                    model_name="gemini-1.5-flash",
+                    model_name="gemini-2.5-flash-lite",
                     system_instruction=system_prompt,
                 )
                 
@@ -470,18 +476,16 @@ def analyze_message_patterns() -> None:
     
     Error handling: One user failing doesn't block others.
     """
-    from anthropic import Anthropic
-    
     patterns_logger.debug("Running pattern analysis job")
-    
+
     try:
         # Fetch all users
         users_res = supabase.table("users").select("id").execute()
-        
+
         scheduler_logger.info(f"Analyzing patterns for {len(users_res.data or [])} users")
-        
-        anthropic = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-        
+
+        _pattern_model = genai.GenerativeModel(model_name="gemini-2.5-flash-lite")
+
         for user in (users_res.data or []):
             user_id = user["id"]
             
@@ -507,28 +511,22 @@ def analyze_message_patterns() -> None:
                     direction = "USER" if msg["direction"] == "inbound" else "COACH"
                     message_text += f"{direction}: {msg['body']}\n"
                 
-                # Ask Claude to detect patterns
-                response = anthropic.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=500,
-                    messages=[{
-                        "role": "user",
-                        "content": f"""{message_text}
+                # Ask Gemini to detect patterns
+                _pattern_prompt = f"""{message_text}
 
 Analyze this message history and detect behavioral patterns. Return a JSON object with this structure:
 {{
-    "quiet_days": ["Mon", "Fri"],  // Days of week with no inbound messages
-    "strong_days": ["Wed", "Thu"],  // Days with strong engagement
-    "best_time": "afternoon",  // Time of day they reply most
+    "quiet_days": ["Mon", "Fri"],
+    "strong_days": ["Wed", "Thu"],
+    "best_time": "afternoon",
     "pattern_notes": "user struggles on Mondays, strong Wednesday mornings"
 }}
 
 Only return JSON, no other text."""
-                    }]
-                )
-                
+                _pattern_resp = _pattern_model.generate_content(_pattern_prompt)
+
                 try:
-                    pattern_data = json.loads(response.content[0].text)
+                    pattern_data = json.loads(_pattern_resp.text.strip())
                 except json.JSONDecodeError:
                     patterns_logger.warning(f"Failed to parse pattern data for user {user_id}")
                     continue
@@ -693,7 +691,7 @@ def send_proactive_pattern_messages() -> None:
                 
                 # Generate proactive message based on pattern type
                 model = genai.GenerativeModel(
-                    model_name="gemini-1.5-flash",
+                    model_name="gemini-2.5-flash-lite",
                     system_instruction=system_prompt,
                 )
                 
@@ -808,7 +806,7 @@ def send_milestone_celebrations() -> None:
                 
                 # Generate special milestone message
                 model = genai.GenerativeModel(
-                    model_name="gemini-1.5-flash",
+                    model_name="gemini-2.5-flash-lite",
                     system_instruction=system_prompt,
                 )
                 
@@ -910,7 +908,7 @@ def send_weekly_reflections() -> None:
                 
                 # Generate reflection
                 model = genai.GenerativeModel(
-                    model_name="gemini-1.5-flash",
+                    model_name="gemini-2.5-flash-lite",
                     system_instruction=system_prompt,
                 )
                 
@@ -963,12 +961,15 @@ def detect_silent_users() -> None:
         now_utc = datetime.now(pytz.UTC)
         
         # Fetch all users
-        users_res = supabase.table("users").select("id, phone, name").execute()
-        
+        users_res = supabase.table("users").select("id, phone, name, paused").execute()
+
         for user in (users_res.data or []):
             user_id = user["id"]
             phone = user.get("phone")
-            
+
+            if user.get("paused"):
+                continue
+
             if not phone:
                 continue
             
@@ -1019,7 +1020,7 @@ def detect_silent_users() -> None:
                 
                 # Generate appropriate message
                 model = genai.GenerativeModel(
-                    model_name="gemini-1.5-flash",
+                    model_name="gemini-2.5-flash-lite",
                     system_instruction=system_prompt,
                 )
                 
@@ -1054,6 +1055,214 @@ def detect_silent_users() -> None:
 
 
 
+def send_activity_notifications() -> None:
+    """
+    Runs every minute. For each user's goals with scheduled times today:
+    - 30 min before activity: upsert activity_notifications row (SCHEDULED),
+      send SMS, mark NOTIFIED
+    - Skips if row already exists and state != SCHEDULED (dedup via state table)
+    - Skips activities with empty times array
+    """
+    scheduler_logger.debug("Running activity notification job")
+
+    try:
+        schedules_res = supabase.table("schedule").select(
+            "user_id, timezone, users(id, phone, name)"
+        ).execute()
+
+        for sched in schedules_res.data or []:
+            user = sched.get("users")
+            if not user or not user.get("phone"):
+                continue
+
+            user_id = user["id"]
+            tz_name = sched.get("timezone") or "America/Los_Angeles"
+
+            try:
+                tz = pytz.timezone(tz_name)
+            except Exception:
+                scheduler_logger.warning(f"Unknown timezone '{tz_name}' for user {user_id}, using LA")
+                tz = pytz.timezone("America/Los_Angeles")
+
+            local_now = datetime.now(tz)
+            day_abbrs = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            today_abbr = day_abbrs[local_now.weekday()]
+            today_date = local_now.strftime("%Y-%m-%d")
+
+            try:
+                goals_res = (
+                    supabase.table("goals")
+                    .select("activity, times_per_day")
+                    .eq("user_id", user_id)
+                    .execute()
+                )
+            except Exception as e:
+                scheduler_logger.error(f"Failed to fetch goals for user {user_id}: {e}")
+                continue
+
+            for goal in goals_res.data or []:
+                activity = goal["activity"]
+                times_per_day = goal.get("times_per_day") or {}
+                today_sched = times_per_day.get(today_abbr, {})
+                times = today_sched.get("times", []) if isinstance(today_sched, dict) else []
+
+                if not times:
+                    continue
+
+                for time_str in times:
+                    try:
+                        sched_h, sched_m = map(int, time_str.split(":"))
+                    except (ValueError, AttributeError):
+                        scheduler_logger.warning(f"Invalid time '{time_str}' for {activity}, user {user_id}")
+                        continue
+
+                    trigger_total = (sched_h * 60 + sched_m - 30 + 1440) % 1440
+                    trigger_h = trigger_total // 60
+                    trigger_m = trigger_total % 60
+
+                    if local_now.hour != trigger_h or local_now.minute != trigger_m:
+                        continue
+
+                    try:
+                        # Check state machine row
+                        existing = (
+                            supabase.table("activity_notifications")
+                            .select("id, state")
+                            .eq("user_id", user_id)
+                            .eq("activity", activity)
+                            .eq("scheduled_date", today_date)
+                            .eq("scheduled_time", time_str)
+                            .execute()
+                        )
+
+                        if existing.data and existing.data[0]["state"] != "SCHEDULED":
+                            scheduler_logger.debug(
+                                f"Notification already in state={existing.data[0]['state']} "
+                                f"for {activity}, user {user_id} — skipping"
+                            )
+                            continue
+
+                        now_utc = datetime.now(pytz.UTC).isoformat()
+
+                        if existing.data:
+                            notif_id = existing.data[0]["id"]
+                        else:
+                            ins = supabase.table("activity_notifications").insert({
+                                "user_id": user_id,
+                                "activity": activity,
+                                "scheduled_date": today_date,
+                                "scheduled_time": time_str,
+                                "state": "SCHEDULED",
+                            }).execute()
+                            notif_id = ins.data[0]["id"]
+
+                        # Format and send SMS
+                        period = "AM" if sched_h < 12 else "PM"
+                        hour_12 = sched_h % 12 or 12
+                        time_12h = f"{hour_12}:{str(sched_m).zfill(2)} {period}"
+                        name = user.get("name") or "there"
+                        try:
+                            from routes.ai import generate_activity_notification_text
+                            body = run_async(generate_activity_notification_text(user_id, activity, time_12h))
+                        except Exception as ai_err:
+                            scheduler_logger.error(
+                                f"AI activity notification failed for {user_id}/{activity}: {ai_err}"
+                            )
+                            body = (
+                                f"Hey {name}! {activity} starts at {time_12h}. "
+                                f"You in? (YES / NO / RESCHEDULE)"
+                            )
+
+                        send_sms(user["phone"], body)
+                        log_message(user_id, body)
+
+                        # Advance state to NOTIFIED
+                        supabase.table("activity_notifications").update({
+                            "state": "NOTIFIED",
+                            "notified_at": now_utc,
+                            "updated_at": now_utc,
+                        }).eq("id", notif_id).execute()
+
+                        scheduler_logger.info(
+                            f"NOTIFIED: {name} / {activity} at {time_12h} "
+                            f"(trigger {trigger_h:02d}:{trigger_m:02d} {tz_name})"
+                        )
+
+                    except Exception as e:
+                        scheduler_logger.error(
+                            f"Error processing notification for {activity}, user {user_id}: {e}"
+                        )
+
+    except Exception as e:
+        scheduler_logger.error(f"Critical error in activity notification job: {e}", exc_info=True)
+
+
+def check_missed_notifications() -> None:
+    """
+    Runs every minute. Finds NOTIFIED notifications with no reply after 30 minutes.
+    Marks state as MISSED and sends a personality-aware follow-up via Gemini.
+    """
+    scheduler_logger.debug("Running missed notification checker")
+
+    try:
+        from routes.ai import generate_notification_response
+
+        now_utc = datetime.now(pytz.UTC)
+        cutoff = (now_utc - timedelta(minutes=30)).isoformat()
+
+        missed_res = (
+            supabase.table("activity_notifications")
+            .select(
+                "id, activity, scheduled_time, "
+                "users!inner(id, phone, name), "
+                "coach_settings!inner(coach_personality, coach_intensity, generated_system_prompt)"
+            )
+            .eq("state", "NOTIFIED")
+            .lte("notified_at", cutoff)
+            .execute()
+        )
+
+        for notif in missed_res.data or []:
+            user = notif.get("users", {})
+            coach = notif.get("coach_settings", {})
+            user_id = user.get("id")
+            phone = user.get("phone")
+
+            if not user_id or not phone:
+                continue
+
+            try:
+                now_iso = now_utc.isoformat()
+
+                supabase.table("activity_notifications").update({
+                    "state": "MISSED",
+                    "updated_at": now_iso,
+                }).eq("id", notif["id"]).execute()
+
+                response = run_async(generate_notification_response(
+                    state="MISSED",
+                    activity=notif["activity"],
+                    user_name=user.get("name", "there"),
+                    system_prompt=coach.get("generated_system_prompt", ""),
+                    coach_personality=coach.get("coach_personality", "hype"),
+                    coach_intensity=coach.get("coach_intensity", 3),
+                ))
+
+                send_sms(phone, response)
+                log_message(user_id, response)
+
+                scheduler_logger.info(
+                    f"MISSED: {user.get('name', user_id)} / {notif['activity']}"
+                )
+
+            except Exception as e:
+                scheduler_logger.error(f"Failed missed notification for user {user_id}: {e}")
+                continue
+
+    except Exception as e:
+        scheduler_logger.error(f"Critical error in missed notification checker: {e}", exc_info=True)
+
+
 def start_scheduler() -> None:
     """
     Register jobs and start the background scheduler. Called from main.py startup.
@@ -1068,6 +1277,7 @@ def start_scheduler() -> None:
     7. send_milestone_celebrations — every night 9pm UTC
     8. send_weekly_reflections — every Sunday 7pm UTC
     9. detect_silent_users — every 6 hours
+    10. send_activity_notifications — every minute (30-min pre-activity SMS)
     """
     if scheduler.running:
         logger.info("Scheduler already running — skipping start")
@@ -1154,15 +1364,34 @@ def start_scheduler() -> None:
         misfire_grace_time=300,
     )
 
+    # Activity notifications: every minute (sends 30-min pre-activity SMS)
+    scheduler.add_job(
+        send_activity_notifications,
+        CronTrigger(minute="*"),
+        id="activity_notifications",
+        replace_existing=True,
+        misfire_grace_time=30,
+    )
+
+    # Missed notification checker: every minute (marks NOTIFIED→MISSED after 30m of no reply)
+    scheduler.add_job(
+        check_missed_notifications,
+        CronTrigger(minute="*"),
+        id="missed_notifications",
+        replace_existing=True,
+        misfire_grace_time=30,
+    )
+
     scheduler.start()
     logger.info(
-        "APScheduler started with 9 jobs: "
+        "APScheduler started with 11 jobs: "
         "checkins (1m), motivation (30m), reminders (1m), "
         "deadlines (6am UTC), patterns (midnight UTC), "
         "proactive (7am UTC), milestones (9pm UTC), "
-        "reflections (Sun 7pm UTC), silence (6h)"
+        "reflections (Sun 7pm UTC), silence (6h), "
+        "activity_notifications (1m), missed_notifications (1m)"
     )
-    scheduler_logger.info("Scheduler initialized with all 9 jobs")
+    scheduler_logger.info("Scheduler initialized with all 11 jobs")
 
 
 def stop_scheduler() -> None:
@@ -1188,3 +1417,10 @@ async def trigger_motivation():
     """Manually fire the motivation job right now (for testing)."""
     send_motivation_messages()
     return {"status": "motivation messages triggered"}
+
+
+@router.post("/trigger-activity-notifications")
+async def trigger_activity_notifications():
+    """Manually fire the activity notification job right now (for testing)."""
+    send_activity_notifications()
+    return {"status": "activity notifications triggered"}

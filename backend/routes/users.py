@@ -32,7 +32,6 @@ class OnboardPayload(BaseModel):
 
     # Step 2 — coach
     coachName: Optional[str] = "Alex"
-    coachAvatar: Optional[str] = "🦁"
     coachSetupMode: Optional[str] = "quick"
     coachPersonality: Optional[str] = None
     coachTalkStyle: Optional[List[str]] = None
@@ -133,14 +132,13 @@ async def onboard_user(payload: OnboardPayload):
                     "activity": activity,
                     "category": category,
                     "days": days_list,
-                    "schedule": days_with_freq,  # { "Mon": 1, "Wed": 2 }
+                    "times_per_day": days_with_freq,
                 }).execute()
 
     # 3. Upsert coach settings
     supabase.table("coach_settings").upsert({
         "user_id": user_id,
         "coach_name": payload.coachName,
-        "coach_avatar": payload.coachAvatar,
         "coach_setup_mode": payload.coachSetupMode,
         "coach_personality": payload.coachPersonality,
         "coach_talk_style": payload.coachTalkStyle or [],
