@@ -443,10 +443,10 @@ export default function LandingPage() {
       {/* ══ COACHES CAROUSEL ════════════════════════════════════ */}
       <section className="lp-section" style={{ padding: '100px 0', background: 'var(--lp-warm)', overflow: 'hidden' }}>
         <div style={{ maxWidth: 1100, margin: '0 auto', padding: '0 28px' }}>
-          <span className="lp-eyebrow reveal" style={{ marginBottom: 12, display: 'block' }}>Pick your coach</span>
-          <h2 className="lp-h2 reveal" style={{ marginBottom: 12 }}>Every voice. <em>One goal.</em></h2>
+          <span className="lp-eyebrow reveal" style={{ marginBottom: 12, display: 'block' }}>You name them. We build them.</span>
+          <h2 className="lp-h2 reveal" style={{ marginBottom: 12 }}>Any voice. <em>Any philosophy.</em></h2>
           <p className="reveal" style={{ fontSize: 15, color: 'rgba(26,22,18,0.4)', lineHeight: 1.6, marginBottom: 44 }}>
-            Text a name — anyone who inspires you. Your coach is ready in seconds.
+            Text any name. Athlete, founder, artist, anyone who drives you. We study how they think and build your coach from their philosophy and standards.
           </p>
         </div>
         <div className="lp-marquee">
