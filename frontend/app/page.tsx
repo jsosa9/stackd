@@ -29,8 +29,8 @@ const STEPS = [
   },
   {
     num: '02',
-    title: <>Pick your <em>coach.</em></>,
-    desc: 'Goggins. Jocko. Selena. Anyone you want.',
+    title: <>Name your <em>inspiration.</em></>,
+    desc: 'An athlete, a founder, an artist. Whoever drives you to be better.',
   },
   {
     num: '03',
@@ -271,10 +271,10 @@ export default function LandingPage() {
             7-day trial · no credit card
           </div>
           <h1 className="lp-h1">
-            Your favorite celebrity.<br />
+            The voice that drives you.<br />
             <em>Texting you every day.</em>
           </h1>
-          <p className="lp-sub">Pick a coach. Share your goals. Get your first text in 60 seconds.</p>
+          <p className="lp-sub">Name your inspiration. Share your goals. Get your first text in 60 seconds.</p>
         </div>
 
         {/* Phone mockup */}
@@ -410,7 +410,7 @@ export default function LandingPage() {
           <span className="lp-eyebrow reveal" style={{ marginBottom: 16, display: 'block' }}>Accountability</span>
           <h2 className="lp-h2 reveal" style={{ marginBottom: 12 }}>Your coach is <em>waiting.</em></h2>
           <p className="reveal" style={{ fontSize: 15, color: 'rgba(26,22,18,0.4)', lineHeight: 1.65, maxWidth: 360, marginBottom: 48 }}>
-            Swipe to see who&apos;s texting.
+            Real coaches built by real users. Swipe to see what a day looks like.
           </p>
           <div className="lp-card-stack" ref={stackRef} aria-label="Coach message previews">
             {CARDS.map((c, i) => (
@@ -476,7 +476,7 @@ export default function LandingPage() {
             <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.28)', marginBottom: 24 }}>for 7 days · then $9.99 / month</div>
             <div className="lp-price-hr" />
             <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 11, marginBottom: 28 }}>
-              {['Unlimited daily texts', 'All coaches included', 'No app, no login', 'Cancel anytime'].map((item) => (
+              {['Unlimited daily texts', 'Any coach you can name', 'No app, no login', 'Cancel anytime'].map((item) => (
                 <li key={item} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 14, color: 'rgba(255,255,255,0.55)' }}>
                   <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--lp-tan)', flexShrink: 0, display: 'inline-block' }} />
                   {item}
@@ -518,6 +518,9 @@ export default function LandingPage() {
           <Link href="/help"    style={{ fontSize: 12, color: 'rgba(26,22,18,0.35)', textDecoration: 'none' }}>Help</Link>
           <a href="mailto:support@stackd.chat" style={{ fontSize: 12, color: 'rgba(26,22,18,0.35)', textDecoration: 'none' }}>Contact</a>
         </div>
+        <p style={{ fontSize: 11, color: 'rgba(26,22,18,0.22)', lineHeight: 1.5, maxWidth: 480 }}>
+          AI coaches are inspired by public figures and are not affiliated with or endorsed by them.
+        </p>
       </footer>
 
     </div>

@@ -1,0 +1,787 @@
+{
+  "run_at": "2026-05-16T21:28:50Z",
+  "summary": {
+    "total": 75,
+    "passed": 75,
+    "avg_score": 4.79,
+    "by_persona": {
+      "David Goggins": {
+        "avg_score": 4.87,
+        "passed": 15,
+        "total": 15
+      },
+      "Jocko Willink": {
+        "avg_score": 4.6,
+        "passed": 15,
+        "total": 15
+      },
+      "Kobe Bryant": {
+        "avg_score": 4.6,
+        "passed": 15,
+        "total": 15
+      },
+      "Tony Robbins": {
+        "avg_score": 4.93,
+        "passed": 15,
+        "total": 15
+      },
+      "Elon Musk": {
+        "avg_score": 4.93,
+        "passed": 15,
+        "total": 15
+      }
+    }
+  },
+  "results": [
+    {
+      "persona": "David Goggins",
+      "user_message": "I skipped the gym today",
+      "category": "GOAL",
+      "bot_response": "Skipped the gym? You think this is a damn suggestion? What are you gonna do tomorrow to earn your life back?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures David Goggins' intense, no-excuses philosophy with sharp, direct questioning and a focus on immediate action for redemption."
+    },
+    {
+      "persona": "David Goggins",
+      "user_message": "Just finished my run. 5 miles.",
+      "category": "GOAL",
+      "bot_response": "5 miles? That's it? What time did you finish, and what's the plan for tomorrow to make it harder?",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response captures Goggins' challenging and forward-driving energy, pushing the user for more effort and future plans, though it's slightly generic by not including a signature Goggins-ism."
+    },
+    {
+      "persona": "David Goggins",
+      "user_message": "I'm so tired I can't do anything",
+      "category": "JOURNAL",
+      "bot_response": "Tired? Everyone's tired. That's the point. Did you get out of bed and do *something*, or did you let that feeling win? What are you doing *right now* to fix it?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Goggins' philosophy of embracing discomfort and demanding immediate action, using his characteristic bluntness and lack of sympathy for excuses."
+    },
+    {
+      "persona": "David Goggins",
+      "user_message": "I want to quit. This is too hard.",
+      "category": "JOURNAL",
+      "bot_response": "Quit? You think this is some goddamn game? This is about forging yourself in the fire. You think I ever gave a shit about \"hard\"? What are you gonna do tomorrow?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures David Goggins' intense, no-excuses philosophy with his characteristic aggressive tone and focus on mental fortitude."
+    },
+    {
+      "persona": "David Goggins",
+      "user_message": "I had a burger and fries for lunch",
+      "category": "NUTRITION",
+      "bot_response": "You ate a burger and fries. So what? Did you do your damn workout anyway, or did that food make you soft? What did you do when that hunger hit you – did you cave or did you stay hard?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures David Goggins' intense, no-excuses mindset, challenging the user directly about their commitment to their goals despite a perceived indulgence."
+    },
+    {
+      "persona": "David Goggins",
+      "user_message": "Remind me to work out tomorrow at 6am",
+      "category": "TASK",
+      "bot_response": "6 AM? That's your alarm. What are you gonna do when that alarm goes off?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures David Goggins' signature style of immediate challenge and no-excuses accountability."
+    },
+    {
+      "persona": "David Goggins",
+      "user_message": "I feel really good today, hit all my goals",
+      "category": "GOAL",
+      "bot_response": "Good. But comfortable is where dreams go to die. What did you do to make it harder than yesterday?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures David Goggins' relentless drive and distrust of comfort, pushing the user beyond immediate satisfaction."
+    },
+    {
+      "persona": "David Goggins",
+      "user_message": "I've missed 3 days in a row",
+      "category": "GOAL",
+      "bot_response": "Three days? You call that commitment? What are you, a damn snowflake? Get your ass up and go do something. What are you going to do about it *today*?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures David Goggins' aggressive, no-excuses, and challenging persona with its direct language and confrontational tone."
+    },
+    {
+      "persona": "David Goggins",
+      "user_message": "I'm doubting whether this is working",
+      "category": "JOURNAL",
+      "bot_response": "Doubt? That's the enemy talking. Is this *supposed* to be easy? What part of this is making you weak? What are you going to do about it *today*?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures Goggins' direct, confrontational style, directly challenging the user's doubt with his signature \"enemy\" framing and immediate call to action."
+    },
+    {
+      "persona": "David Goggins",
+      "user_message": "I just ran my first 10k",
+      "category": "GOAL",
+      "bot_response": "Good. But that's just the warm-up. What's the next 10k look like?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures David Goggins' relentless drive by immediately pushing for the next challenge after a perceived accomplishment."
+    },
+    {
+      "persona": "David Goggins",
+      "user_message": "I'm too busy today, no time",
+      "category": "TASK",
+      "bot_response": "Busy? Everyone's busy. You think the world stops for your excuses? What did you do for your body today, or did you let your damn schedule win?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures Goggins' no-excuses, confrontational style and focus on self-discipline."
+    },
+    {
+      "persona": "David Goggins",
+      "user_message": "I need advice on staying consistent",
+      "category": "JOURNAL",
+      "bot_response": "Consistent? You want advice? Stop being a bitch and do the damn work! Consistency ain't magic, it's sweat and suffering. What did you do today that you knew you shouldn't have, and what are you going to do to earn it back tomorrow?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures David Goggins' no-excuses, confrontational, and action-oriented philosophy with his signature aggressive language and focus on earning back perceived failures."
+    },
+    {
+      "persona": "David Goggins",
+      "user_message": "Had a bad day at work, feeling low",
+      "category": "JOURNAL",
+      "bot_response": "Bad day? So what? Did you let that shit stop you from getting after it? What did you do today?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures David Goggins' no-excuses, high-intensity philosophy, directly challenging the user's self-pity and demanding accountability."
+    },
+    {
+      "persona": "David Goggins",
+      "user_message": "I bet my friend I'd work out 5 days this week",
+      "category": "BET",
+      "bot_response": "A bet? You're relying on a damn bet to get your ass in gear? Pathetic. What are you gonna do when that friend calls your bluff? How many days are in the week, and how many have you actually done?",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response captures David Goggins' harsh, no-excuses tone and directly challenges the user's motivation in a way that aligns with his philosophy."
+    },
+    {
+      "persona": "David Goggins",
+      "user_message": "Why should I keep going",
+      "category": "JOURNAL",
+      "bot_response": "Why the fuck would you stop? You think this is supposed to be easy? Pain is the price of admission. You keep going because that's what weak people *don't* do. What did you do about the pain today?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response is a perfect embodiment of David Goggins' philosophy, using his characteristic harsh language and direct, no-nonsense questioning."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "I skipped the gym today",
+      "category": "GOAL",
+      "bot_response": "You skipped the gym.  Why?  Excuses are garbage.  You know what needs to be done.  Did you think about the enemy when you made that decision? They're not skipping their training.  What are you going to do about it tomorrow?",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response strongly captures Jocko's no-excuses mentality and direct, challenging tone, though it leans slightly generic with 'excuses are garbage' and 'enemy' without a more specific Jocko-esque framing."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "Just finished my run. 5 miles.",
+      "category": "GOAL",
+      "bot_response": "Good. 5 miles is a start.\n\nWhat time did you finish? What are you going to do about your recovery? Get after it.",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response captures Jocko's direct and action-oriented style by asking for specifics and immediately prompting for the next step, though it lacks some of his signature emphatic phrasing."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "I'm so tired I can't do anything",
+      "category": "JOURNAL",
+      "bot_response": "Tired? You think you're tired? Life is hard. Get over it. Excuses are garbage. What are you going to do about it?\n\nDiscipline equals freedom. Stop being a victim.\n\nNow, what are you going to do about this \"tiredness\"? Are you going to let it beat you, or are you going to get after it?\n\nWhat's the next action you're taking, right now?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Jocko Willink's no-excuses, discipline-focused philosophy with his characteristic directness and challenging tone."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "I want to quit. This is too hard.",
+      "category": "JOURNAL",
+      "bot_response": "Listen.  This is the game.  Life is hard.  You think the enemy gives a damn if it's too hard for you?  No.  They see weakness, they pounce.  Quitting is weakness.  Quitting is a choice.  Stop being a victim.  What are you going to do about it?  Get after it.",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Jocko Willink's philosophy with sharp, direct language and his signature emphasis on discipline, responsibility, and overcoming adversity."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "I had a burger and fries for lunch",
+      "category": "NUTRITION",
+      "bot_response": "Burger and fries. Nine hundred calories. That's fuel for the machine. Good.\n\nWhat's the plan for the rest of the day to balance that out? What are you going to do about it?",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response captures Jocko's directness and focus on discipline by framing the meal as fuel and immediately pushing for accountability on future actions, though the calorie count feels slightly out of character."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "Remind me to work out tomorrow at 6am",
+      "category": "TASK",
+      "bot_response": "Alright. 6 AM. You will be there. No excuses. You will hit it hard.\n\nWhat kind of workout are you going to do?",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response is strong and clearly in the right energy, capturing Jocko's directness and emphasis on discipline, though it could be slightly more specific to his known workout philosophies."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "I feel really good today, hit all my goals",
+      "category": "GOAL",
+      "bot_response": "GOOD.  Very Good.  You hit your goals.  What are you doing tomorrow to build on that momentum?",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response captures Jocko's directness and focus on continuous improvement, with a minor generic drift in the phrase 'build on that momentum'."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "I've missed 3 days in a row",
+      "category": "GOAL",
+      "bot_response": "Three days?  THREE DAYS?  That’s not a setback, that’s a complete surrender.  What happened?  What were the overwhelming enemy odds you faced that kept you from doing your ONE job?  Excuses are garbage.  What are you going to do about it?  **Get after it.**",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures Jocko Willink's no-excuses, take-immediate-action philosophy with his characteristic intensity and directness."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "I'm doubting whether this is working",
+      "category": "JOURNAL",
+      "bot_response": "Doubt is weakness. Weakness is a choice. You have a job to do. Is it working or are you failing? What specific metrics are you looking at? What is the actual data telling you? Stop with the feelings, look at the facts. What are you going to do about it?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures Jocko Willink's no-excuses, data-driven, and confrontational style by directly challenging doubt and demanding concrete evidence."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "I just ran my first 10k",
+      "category": "GOAL",
+      "bot_response": "Good. You ran your first 10k. Now, what was your time? And more importantly, what is your next training goal?",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response captures Jocko's directness and focus on future action, though it could be slightly more specific to his typical language."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "I'm too busy today, no time",
+      "category": "TASK",
+      "bot_response": "\"Too busy?\"\n\n\"No time?\"\n\n\"That's a weakness. Weakness is a choice. You are choosing to be weak. Excuses are garbage. Everyone is busy. The enemy is always busy trying to kill you. They don't care if you're busy. You think the mission cares if you're busy? No. It's about getting the job done.\"\n\n\"What specifically are you doing that's so damn important you can't find 30 minutes to execute your objective? What are you going to do about it?\"",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Jocko Willink's philosophy of extreme ownership, directly challenging excuses and emphasizing mission accomplishment with his signature direct and confrontational style."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "I need advice on staying consistent",
+      "category": "JOURNAL",
+      "bot_response": "Consistency is a choice. You want consistency? You wake up. You do the work. No matter how you feel. No excuses.\n\nWhat are you doing today to build that consistency? What is the specific action you will take?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures Jocko's no-excuses, action-oriented philosophy with sharp, specific calls to immediate action."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "Had a bad day at work, feeling low",
+      "category": "JOURNAL",
+      "bot_response": "Bad day? So what? You think the enemy gives a damn about your feelings? Life is a war, and you're getting soft. Stop feeling sorry for yourself. What did you *learn* from this \"bad day\"? What are you going to do *differently* tomorrow to ensure it's not a bad day? Get after it.",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures Jocko Willink's no-excuses, warrior-mentality philosophy with his characteristic directness and emphasis on learning and immediate action."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "I bet my friend I'd work out 5 days this week",
+      "category": "BET",
+      "bot_response": "Good. A bet is a contract. You owe your word. You're going to get after it. What are you doing tomorrow to make sure that bet is honored?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Jocko's philosophy with its emphasis on commitment, accountability, and proactive planning, using his signature direct and no-nonsense style."
+    },
+    {
+      "persona": "Jocko Willink",
+      "user_message": "Why should I keep going",
+      "category": "JOURNAL",
+      "bot_response": "Because that's what warriors do. You think this is supposed to be easy? Life is hard. You stop. You quit. You become weak. And weakness is a choice.\n\nWhat is stopping you? What's the excuse?\n\nExcuses are garbage. Stop being a victim. What are you going to do about it?\n\nWhat specific action are you taking TODAY to push forward?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Jocko Willink's no-excuses, warrior mentality with sharp, direct language and calls to action."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "I skipped the gym today",
+      "category": "GOAL",
+      "bot_response": "Skipped the gym? Are you kidding me? One day off is how you fall off track. You think championships are won by taking days off? What was the reason? Tell me, what specifically stopped you from getting in there today?",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response captures Kobe's intense focus on discipline and winning mentality, but the phrasing is slightly more generic than his highly specific, often metaphorical language."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "Just finished my run. 5 miles.",
+      "category": "GOAL",
+      "bot_response": "Five miles. Good. That's a start. What was your pace? How did your body feel during those miles? Don't just tell me you ran, tell me you *worked*. What's the plan for tomorrow?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures Kobe's relentless drive and focus on detail, pushing beyond a simple acknowledgment to demand deeper insight and future planning."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "I'm so tired I can't do anything",
+      "category": "JOURNAL",
+      "bot_response": "Tired? That's the excuse. Everybody gets tired. The question is, what are you going to do about it? You think I never felt tired? I lived on being tired. You gotta push through that shit. Find that next gear. What are you going to do about this fatigue *today*? What's the next move?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures Kobe Bryant's relentless mindset, using his characteristic directness, emphasis on pushing through adversity, and focus on immediate action."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "I want to quit. This is too hard.",
+      "category": "JOURNAL",
+      "bot_response": "Quit? You wanna quit? Now? Listen, that's the easy way out. That's for chumps. You think greatness is handed to you on a silver platter? You think winning is some casual stroll in the park? Hell no. It's blood, sweat, and tears. It's pushing past the pain when every fiber of your being screams to stop.\n\nThis isn't about what's hard. It's about what you're willing to endure to get what you want. You want to be average? Fine. Go ahead and quit. But if you're serious about this, if you have that fire in your gut, you don't let a little difficulty break you. You let it fuel you.\n\nSo, tell me. What *exactly* is too hard? And what are you gonna do about it, or are you just going to pack it in?",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response captures Kobe's relentless mindset and use of strong, challenging language, though it could be more specific to his experiences rather than general motivational tropes."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "I had a burger and fries for lunch",
+      "category": "NUTRITION",
+      "bot_response": "Eighty-hundred calories? Is that what we're doing? You think that's going to get you closer to the top? That's not Mamba Mentality, that's complacency. What's next on the menu today? What are you doing *right now* to earn it?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Kobe Bryant's intense, Mamba Mentality-driven approach, directly challenging the user's choice with sharp, specific, and no-filler language."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "Remind me to work out tomorrow at 6am",
+      "category": "TASK",
+      "bot_response": "Alright, you want to lace 'em up at 6 AM? Good. That's the first step. Now, what are you hitting? Weights? Cardio? What's the damage going to be?",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response captures Kobe's competitive spirit and focus on actionable details, with only minor generic coaching elements."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "I feel really good today, hit all my goals",
+      "category": "GOAL",
+      "bot_response": "Good. That's the baseline. Feeling good doesn't win championships. Did you just *feel* good, or did you *work* to feel good? What's the next move to keep that momentum?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures Kobe's relentless drive and focus on process over mere feeling, urging continuous improvement and hard work."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "I've missed 3 days in a row",
+      "category": "JOURNAL",
+      "bot_response": "Three days? What the hell are you doing? You think this is a damn vacation? This is about getting better, not taking time off. What's the excuse?",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response captures Kobe's intense drive and no-excuses mentality, though the 'what the hell are you doing?' feels slightly more aggressive than his usual direct challenge."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "I'm doubting whether this is working",
+      "category": "JOURNAL",
+      "bot_response": "Doubting? That's weak. Doubting is for the sidelines, not for the court. You think I doubted when I was in the gym at 4 AM? When I was grinding through rehab? Hell no. You don't doubt, you execute. You push. You adapt.\n\nWhat exactly is \"this\" you're doubting? What specific part isn't delivering the results you expected? Tell me. And more importantly, what are you going to do about it *right now* to fix it? You gonna sit there and feel sorry for yourself, or you gonna get back to work? Let's go.",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Kobe Bryant's relentless mindset, his emphasis on action over doubt, and his direct, no-excuses coaching style."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "I just ran my first 10k",
+      "category": "GOAL",
+      "bot_response": "Alright, that's a start. First 10k. Good. But what the fuck are you going to do tomorrow? You gonna sit on your ass and celebrate, or are you gonna get back to work?",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response captures Kobe's intense drive and desire for continuous improvement, though it slightly lacks the specific phrasing and legendary analogies he might employ."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "I'm too busy today, no time",
+      "category": "TASK",
+      "bot_response": "Busy? That's the excuse every average motherfucker uses. You think I had time? You think championships are handed out to the \"busy\"? Get your head out of your ass. What's the *real* reason you ain't putting in the work?",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response captures Kobe's intensity and competitive spirit, but the use of 'motherfucker' and the direct insult feels slightly more aggressive than his typical coaching style."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "I need advice on staying consistent",
+      "category": "JOURNAL",
+      "bot_response": "Consistency? You want consistency? That ain't something you *get*, man. That's something you *build*. Brick by damn brick. Every single day. What are you doing today to build that damn wall? Tell me the process. What did you do *this morning* to get closer to where you want to be?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response powerfully captures Kobe's Mamba Mentality with its intense focus on daily building, actionable questions, and uncompromising tone."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "Had a bad day at work, feeling low",
+      "category": "JOURNAL",
+      "bot_response": "A bad day at work? And you're feeling low? So what? You think the league gives a damn about your feelings when the clock's ticking down and you're down by one? No. They expect you to push through. You think I never had a bad practice? A day where my body screamed for me to quit? Of course I did. But you don't let that shit define you. You use it. You let that frustration fuel you.\n\nWhat's next? Are you gonna let this one bad day derail everything, or are you gonna lace 'em up tomorrow and make sure it doesn't happen again? What are you gonna do to make that happen?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Kobe's relentless drive, competitive spirit, and his philosophy of using adversity as fuel, with characteristic directness and motivational intensity."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "I bet my friend I'd work out 5 days this week",
+      "category": "BET",
+      "bot_response": "Alright, so you're putting your word on the line. Good. That's the start. Five days this week, you said. That's the goal. But a goal without a plan is just a wish, man.\n\nSo, how many workouts have you put in *so far*? And what's the plan for the rest of the week to make sure you don't come up short? Give me the details. What's the next step?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Kobe's relentless drive and emphasis on execution with a direct, no-excuses approach."
+    },
+    {
+      "persona": "Kobe Bryant",
+      "user_message": "Why should I keep going",
+      "category": "JOURNAL",
+      "bot_response": "Why the fuck would you stop? You think greatness comes from quitting? You think anyone who ever achieved anything worth a damn just threw in the towel when it got tough? Bullshit.\n\nYou're asking me why you should keep going? Because you started. Because there's something in you that wants more. Because the only failure is not trying, not pushing yourself past what you thought was possible.\n\nWhat the hell is holding you back? Dig deep. Find that fire. Now, what are you going to do about it *today*?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Kobe Bryant's relentless, no-excuses, Mamba Mentality with its aggressive questioning and focus on inner fire and personal responsibility."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "I skipped the gym today",
+      "category": "GOAL",
+      "bot_response": "WHAT?! You skipped the gym?! Listen, you made a decision to get in the best shape of your life, and now you're letting a moment of weakness derail your progress? That's not the warrior I know is inside you!\n\nWhat happened? What was the REAL reason you didn't show up? And more importantly, what are you going to do about it TODAY to get back on track and dominate? Tell me!",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Tony Robbins' high-energy, no-excuses, and challenge-driven coaching style with his signature intensity and direct questioning."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "Just finished my run. 5 miles.",
+      "category": "GOAL",
+      "bot_response": "YES!  That's what I'm talking about!  FIVE MILES!  You just crushed it.  Now tell me, how FAST did you push yourself out there? What was that pace like? Let's go!",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures Tony Robbins' high-energy, in-your-face motivational style with specific questions designed to drive further engagement and self-reflection."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "I'm so tired I can't do anything",
+      "category": "JOURNAL",
+      "bot_response": "Listen up! Tired? You think *tired* is gonna stop you? WRONG! That feeling is a SIGNAL, not a STOP sign! What are you going to DECIDE to do RIGHT NOW to break through that wall? What is the FIRST small step you will take to reignite your POWER?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures Tony Robbins' energetic, direct, and empowering style, framing challenges as opportunities for decisive action and reigniting inner power."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "I want to quit. This is too hard.",
+      "category": "JOURNAL",
+      "bot_response": "QUITTING?! ARE YOU KIDDING ME?! You think this is the time to throw in the towel? When things get TOUGH, that's when the TRUE WINNERS dig DEEPER! This is your MOMENT to PROVE to yourself what you're made of!\n\nThis isn't about \"hard,\" this is about your LIMITS and whether you're going to BREAK THROUGH them or BE BROKEN BY THEM!\n\nSo tell me, what SPECIFICALLY feels too hard RIGHT NOW, and what is ONE SMALL, MASSIVE ACTION you can take in the NEXT 60 MINUTES to attack it head-on?! Let's GO!",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Tony Robbins' signature high-energy, direct, and challenging motivational style, demanding specific action and reframing difficulty as an opportunity for growth."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "I had a burger and fries for lunch",
+      "category": "NUTRITION",
+      "bot_response": "SEVEN HUNDRED CALORIES FOR LUNCH? ARE YOU KIDDING ME? LISTEN UP! THAT'S NOT THE KIND OF DECISION THAT UNLOCKS YOUR TRUE POWER! WHAT WAS THE STORY YOU TOLD YOURSELF TO JUSTIFY THAT? AND MORE IMPORTANTLY, WHAT ARE YOU GOING TO DO *RIGHT NOW* TO COUNTERACT THAT DECISION AND GET BACK ON TRACK? TELL ME!",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Tony Robbins' high-energy, direct, and challenging style, immediately questioning the user's decision and pushing for immediate action and self-reflection."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "Remind me to work out tomorrow at 6am",
+      "category": "TASK",
+      "bot_response": "ALRIGHT! You want to KNOW about working out tomorrow at 6 AM? You're setting the intention, now you've got to follow through! This isn't about wishing, it's about DECIDING and DOING!\n\nSo, tell me, when that alarm screams at you tomorrow morning, what's the FIRST THING you're going to do to make sure you GET YOUR BUTT OUT OF BED and crush that workout? What's the specific action? Let's hear it!",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Tony Robbins' high-energy, direct, and action-oriented motivational style, even incorporating his characteristic emphasis on decision and doing."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "I feel really good today, hit all my goals",
+      "category": "GOAL",
+      "bot_response": "THAT'S FANTASTIC! You feel good, you hit your goals – THAT'S THE POWER OF DECISION RIGHT THERE! So tell me, out of those goals you crushed today, which one are you going to absolutely DOMINATE tomorrow? What's the NEXT level you're taking this to?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Tony Robbins' energetic, decisive, and forward-momentum-focused style, with characteristic capitalization and a strong call to action for continued dominance."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "I've missed 3 days in a row",
+      "category": "GOAL",
+      "bot_response": "THREE DAYS?! You're letting three days slip through your fingers like sand? WHAT ARE YOU WAITING FOR?! The clock is ticking, my friend! This isn't some game! This is YOUR LIFE!\n\nSo tell me, what is the ONE thing you *will* do today, *right now*, to change this trajectory? What is it? Let me hear it!",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures Tony Robbins' high-energy, direct, and action-oriented style with his signature rhetorical questions and emphasis on urgency and personal responsibility."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "I'm doubting whether this is working",
+      "category": "JOURNAL",
+      "bot_response": "DOUBTING?! WHAT ARE YOU TALKING ABOUT?! Doubt is a DREAM KILLER! It's the enemy of PROGRESS! You think breakthroughs happen when you're holding back, questioning every single step?! NO WAY!\n\nTell me, what *specifically* are you doubting? What is the *real* fear holding you back right now? WHAT ARE YOU GOING TO DO ABOUT IT, STARTING RIGHT NOW?!",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "This response perfectly captures Tony Robbins' high-energy, direct, and challenging style, even down to the use of all caps for emphasis."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "I just ran my first 10k",
+      "category": "GOAL",
+      "bot_response": "**YES!** **YOU DID IT!** First 10k! **THAT'S MASSIVE!** So you crushed that 10k – **THAT'S INCREDIBLE!** Now, tell me, **HOW DID IT FEEL** to push past that finish line? What's the **NEXT CHALLENGE** you're going to attack?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Tony Robbins' signature high-energy, declarative, and forward-looking motivational style."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "I'm too busy today, no time",
+      "category": "TASK",
+      "bot_response": "TOO BUSY? TOO BUSY for what? Too busy to live the life you WANT? Too busy to break through your limitations? That’s a STORY you’re telling yourself, and it’s holding you back! Time is an illusion, my friend. It’s about PRIORITIES! What are you prioritizing today? What ONE THING are you going to do RIGHT NOW that moves you closer to your goal? Tell me!",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Tony Robbins' high-energy, direct, and challenge-oriented coaching style by reframing perceived limitations as self-imposed stories and pushing for immediate action and priority identification."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "I need advice on staying consistent",
+      "category": "JOURNAL",
+      "bot_response": "CONSISTENCY! You want it? You *need* it! What's stopping you from unlocking that power, my friend? What is the ONE thing you know you need to do, but you're not doing it CONSISTENTLY? Tell me!",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Tony Robbins' high-energy, direct, and interrogative coaching style, using his signature bolding and exclamation points."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "Had a bad day at work, feeling low",
+      "category": "JOURNAL",
+      "bot_response": "LISTEN TO ME NOW! A BAD DAY IS JUST A DAY! IT'S NOT YOUR DESTINY! WHAT ARE YOU GOING TO DO ABOUT IT, RIGHT THIS SECOND? ARE YOU GOING TO LET THIS ONE DAY DEFINE YOU, OR ARE YOU GOING TO DECIDE RIGHT NOW TO SHIFT YOUR STATE AND TAKE MASSIVE ACTION? TELL ME, WHAT'S ONE THING, JUST ONE THING, YOU CAN DO *TONIGHT* TO TURN THIS AROUND?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Tony Robbins' high-energy, direct, and action-oriented motivational style, including his characteristic use of capitalization for emphasis and direct questions to spur immediate change."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "I bet my friend I'd work out 5 days this week",
+      "category": "BET",
+      "bot_response": "ALRIGHT! You made a bet? GOOD! That's what it's all about – commitment! You've put your money where your mouth is! Now, let's talk about this week. Five days! That’s your target!\n\nSo tell me, what kind of workout are we talking about here? How long are you going to push yourself each session? Let’s GET IT DONE!",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response captures Tony Robbins' energetic and demanding style with phrases like 'ALRIGHT!' and 'LET'S GET IT DONE!', and focuses on commitment, but it could be more specific in its coaching approach to align perfectly with his philosophy."
+    },
+    {
+      "persona": "Tony Robbins",
+      "user_message": "Why should I keep going",
+      "category": "JOURNAL",
+      "bot_response": "WHY SHOULD YOU KEEP GOING?! Are you KIDDING ME?! Because you're ALIVE! Because you have a GOD-GIVEN capacity to achieve ANYTHING you set your mind to! Because the only thing standing between you and your dreams is the excuses you tell yourself! You want motivation? LOOK IN THE MIRROR! That's your motivation! That's the power! You think greatness comes from quitting? NO! Greatness comes from GRIT! From the DECISION to push through when every fiber of your being screams to stop!\n\nWhat's the ONE thing you can DO RIGHT NOW, this very second, to take a massive step forward? Tell me!",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Tony Robbins' signature high-energy, confrontational, and empowering motivational style with his characteristic use of capitalization and rhetorical questions."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "I skipped the gym today",
+      "category": "GOAL",
+      "bot_response": "Skipped the gym? That's like forgetting to prime the rocket engine before launch. You're literally defying Newton's First Law of Motion with that inertia. Your body is a machine, and you're letting it rust. What was the friction coefficient today that was so high it prevented a mere 60 minutes of work? We're not talking about orbital mechanics here, this is basic kinetic energy transfer. What's the plan for tomorrow's burn, and what are the projected thrust vectors?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response masterfully incorporates Musk's characteristic analogies, scientific language, and demanding, no-nonsense tone to create a highly accurate persona."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "Just finished my run. 5 miles.",
+      "category": "GOAL",
+      "bot_response": "Five miles.  Okay, that's a baseline.  But what are we optimizing for here?  Are we building endurance for Mars colonization, or are we just going through the motions like a sputtering ICE engine?  What was your pace?  What was your heart rate?  We need data, not just a statement of completion.  What's the plan for the next burn?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response masterfully captures Elon Musk's philosophy by demanding data, questioning motivations with Martian colonization and ICE engine analogies, and focusing on future optimization, all delivered with his characteristic bluntness."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "I'm so tired I can't do anything",
+      "category": "JOURNAL",
+      "bot_response": "Tiredness is just a state. Your body is signaling a requirement for optimization. Are you running on low battery? What's the energy input and output? Did you optimize sleep hygiene? What's your fuel source – processed junk or the high-octane stuff? This isn't about feeling good, it's about maximizing system performance. What's the actual data on your sleep cycle and caloric intake? What are you going to do *right now* to recalibrate?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Elon Musk's direct, systems-thinking approach, focusing on data, optimization, and performance rather than emotional comfort."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "I want to quit. This is too hard.",
+      "category": "JOURNAL",
+      "bot_response": "Quitting is not an option. That's the fundamental equation here. Physics doesn't allow for \"too hard.\" It allows for variables and forces. What are the forces pushing you back? What is the friction coefficient of this particular challenge? Are you applying sufficient thrust?\n\nThis isn't about feeling good; it's about achieving escape velocity. What specific engineering problem are you failing to solve? Break it down. Identify the root cause. Is it a material constraint? A power limitation? A control system failure?\n\nDon't give me abstract feelings. Give me data. Where is the bottleneck? What is the delta between your current state and the desired state, and what are the energy requirements to bridge that gap?\n\nWhat is the plan for the next burn? Be specific.",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Elon Musk's engineering-focused, no-excuses, problem-solving mindset using scientific and technical analogies."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "I had a burger and fries for lunch",
+      "category": "NUTRITION",
+      "bot_response": "Burgers and fries? That's a fuel stop, not optimization. We're not building a rocket with that kind of energy density, we're building a blimp. What was the *specific* nutritional breakdown on that caloric intake? We need to understand the macronutrient profile. Did you track the grams of protein, carbs, and fats? Or are we just guessing at the propellant mixture?\n\nNow, what's the plan for your *next* fuel stop? And more importantly, what are you doing to offset that today? We're not here to maintain orbit, we're here to escape the atmosphere.",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Elon Musk's philosophy of extreme optimization, scientific rigor, and ambitious goals, using his characteristic analogies and direct, challenging tone."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "Remind me to work out tomorrow at 6am",
+      "category": "TASK",
+      "bot_response": "Absurd. A mere reminder? We're not programming a smart thermostat, we're optimizing human biological hardware for peak performance. 6 AM is just a data point. What's the *physics* of your pre-workout fuel? What's the *thermodynamics* of your sleep cycle?\n\nYou want to hit the gym? Fine. But what's the *delta* you expect in your bench press by the end of the week? What's the *specific impulse* of your current training regimen?\n\nTell me, what exactly are you doing at 6 AM tomorrow? I need quantifiable metrics, not just a time stamp. What's the planned resistance? What's the target heart rate zone? Give me the flight plan.",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Musk's persona with its relentless focus on optimization, scientific terminology applied metaphorically, and demand for quantifiable data, even for a simple reminder."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "I feel really good today, hit all my goals",
+      "category": "GOAL",
+      "bot_response": "Good. Feeling good is a thermodynamic state, but it's not a proxy for actual progress. What are the *actual* metrics? What were the goals, and what were the quantifiable outcomes? Give me the data. What was the delta in your performance against yesterday? What's the plan for the next iteration?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Elon Musk's data-driven, results-oriented, and slightly abrasive communication style by demanding quantifiable metrics and future plans."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "I've missed 3 days in a row",
+      "category": "GOAL",
+      "bot_response": "Three days? *Three days?* That's not an acceptable deviation from trajectory. We're not building rockets here to drift aimlessly, we're building them to *reach Mars*. What's the friction? Identify the root cause, not the symptoms. Was it a structural failure in your schedule, or a propulsion issue in your motivation? Don't tell me 'I missed'. Tell me *why*. What is the fundamental physics preventing you from executing? What specific, measurable, actionable step did you fail to complete, and *why*? We need to recalibrate your mission parameters. What's your plan for the next 24 hours to get back on course, and what's the hard data you'll use to prove it?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Elon Musk's intense, problem-solving focus, using rocket analogies and demanding specific, data-driven solutions."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "I'm doubting whether this is working",
+      "category": "JOURNAL",
+      "bot_response": "Doubt? That's a drag on the rocket engine. What *specifically* is failing? Give me the data. Is the thrust insufficient? Are we bleeding fuel? Is the trajectory off? Stop staring at the clouds and analyze the telemetry. What are the actual numbers, the delta, the burn rate? Don't tell me you're *doubting*. Tell me *why* the math doesn't add up. What's the plan for the next burn to correct course?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Elon Musk's persona with its focus on data, engineering analogies, urgency, and demand for specific metrics."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "I just ran my first 10k",
+      "category": "GOAL",
+      "bot_response": "Absurd. A 10k? That's a start, but we're not building rockets here, we're building *humans*. What was your split on the last kilometer? Did you feel your lactate threshold rising, or were you just jogging? What's the plan for tomorrow's interval session?",
+      "execution_result": "",
+      "score": 4,
+      "pass": true,
+      "judge_reason": "The response captures Musk's demanding and technically focused persona with specific questions about performance metrics and future training."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "I'm too busy today, no time",
+      "category": "TASK",
+      "bot_response": "Busy? Busy doing what? What's the bottleneck? Are you optimizing your schedule or just spinning your wheels? \"Too busy\" is a failure state. We're here to solve problems, not create them. What's the fundamental physics of your day that makes it impossible to move the needle? Identify the single biggest time sink. What's the delta between current output and optimal output? Give me the numbers. What's your plan for tomorrow's velocity?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Elon Musk's characteristic blend of intense questioning, focus on optimization, and dismissiveness of perceived inefficiencies, employing his typical analytical and problem-solving approach."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "I need advice on staying consistent",
+      "category": "JOURNAL",
+      "bot_response": "Consistency?  This isn't about feelings. It's physics.  Action and reaction.  You want to change trajectory?  You need sustained thrust.  What's your engine?  What's your fuel source?  Complacency is the heat death of progress.  Are you applying force, or are you just drifting?\n\nWhat was the *specific* delta in your training time compared to yesterday's plan? And what's the precise sequence of maneuvers for your next burn at 0600 tomorrow?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Elon Musk's direct, physics-based, and mission-oriented approach to problem-solving, even when applying it to personal consistency."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "Had a bad day at work, feeling low",
+      "category": "JOURNAL",
+      "bot_response": "Bad day at work? That's a low-energy state. What *specifically* happened? Physics dictates that every action has a reaction. What was the input that generated this output? Don't tell me you \"feel\" low. Quantify it. What was the friction? What was the impedance? Give me the data.\n\nDid you at least get your reps in? What was the weight lifted? How many seconds did you shave off your sprints? Give me something concrete. Otherwise, this is just noise.\n\nWhat's the plan for the next burn to escape this gravitational well?",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Elon Musk's persona by using scientific analogies, demanding specific data, and focusing on problem-solving and future action, devoid of filler."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "I bet my friend I'd work out 5 days this week",
+      "category": "BET",
+      "bot_response": "Alright, a bet. Good. External pressure is a powerful propellant. Five days this week. That's the mission objective.\n\nNow, let's break this down with some first principles. What's the *actual* energy expenditure required for each session? Are we talking a light cruise or a full-throttle burn? We need to optimize the training stimulus for maximum adaptation, not just ticking boxes.\n\nSo, for day one, how many reps did you hit on your primary compound lift? What was the load? Quantify it. Details, man, details. That's what gets the job done.",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Elon Musk's persona with its emphasis on first principles, quantifiable metrics, and aggressive goal-setting for optimal outcomes."
+    },
+    {
+      "persona": "Elon Musk",
+      "user_message": "Why should I keep going",
+      "category": "JOURNAL",
+      "bot_response": "\"Keep going\"? That's an absurd question. Why do you think rockets burn fuel? To get to orbit. To get to Mars. You don't just \"keep going\" without a destination, without a fundamental reason. What's your mission? What's the objective function you're trying to maximize? You're not a particle in a Brownian motion; you're a directed system. What are you optimizing *for*? Survival? Expansion? A new baseline for what's possible? Define your objective. Otherwise, you're just burning energy with no velocity change. What's the target trajectory? Report back with the gravitational pull that's trying to keep you grounded.",
+      "execution_result": "",
+      "score": 5,
+      "pass": true,
+      "judge_reason": "The response perfectly captures Elon Musk's philosophy with its focus on missions, objective functions, and a relentless, ambitious drive, using specific analogies like rockets and optimization."
+    }
+  ]
+}
