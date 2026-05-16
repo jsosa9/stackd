@@ -1,0 +1,7 @@
+backend/
+logs/
+.claude/
+*.pyc
+__pycache__/
+.env
+.DS_Store
