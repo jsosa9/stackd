@@ -19,6 +19,26 @@ from routes.unsubscribe import router as unsubscribe_router
 
 load_dotenv()
 
+# ---------------------------------------------------------------------------
+# Startup env validation — fail fast with a clear message
+# ---------------------------------------------------------------------------
+
+_REQUIRED_ENV = [
+    "SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "GEMINI_API_KEY",
+    "TWILIO_ACCOUNT_SID",
+    "TWILIO_AUTH_TOKEN",
+    "TWILIO_PHONE_NUMBER",
+]
+
+_missing = [var for var in _REQUIRED_ENV if not os.getenv(var)]
+if _missing:
+    raise EnvironmentError(
+        f"Missing required environment variables: {', '.join(_missing)}\n"
+        "Check your .env file or Railway/Vercel environment settings."
+    )
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
