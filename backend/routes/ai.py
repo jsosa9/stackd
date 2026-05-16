@@ -378,8 +378,6 @@ async def get_user_personality_context(user_id: str, coach_row: dict | None = No
         return ''
 
 
-router = APIRouter()
-
 # ---------------------------------------------------------------------------
 # Client setup
 # ---------------------------------------------------------------------------

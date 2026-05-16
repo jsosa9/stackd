@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 
@@ -9,7 +9,7 @@ const TWILIO_NUMBER = process.env.NEXT_PUBLIC_TWILIO_NUMBER ?? '';
 
 type State = 'loading' | 'success' | 'error';
 
-export default function UnsubscribePage() {
+function UnsubscribeContent() {
   const searchParams = useSearchParams();
   const [state, setState] = useState<State>('loading');
 
@@ -23,6 +23,51 @@ export default function UnsubscribePage() {
       .catch(() => setState('error'));
   }, [searchParams]);
 
+  return (
+    <main className="unsub-main">
+      <div className="unsub-card">
+
+        {state === 'loading' && (
+          <>
+            <div className="unsub-spinner" role="status" aria-label="Processing" />
+            <p className="unsub-sub">One moment…</p>
+          </>
+        )}
+
+        {state === 'success' && (
+          <>
+            <div className="unsub-icon" aria-hidden="true">✓</div>
+            <h1 className="unsub-h1">You&apos;re unsubscribed.</h1>
+            <p className="unsub-sub">No more messages will be sent to your number.</p>
+            <p className="unsub-small">
+              Changed your mind?{TWILIO_NUMBER ? (
+                <> Text <strong>START</strong> to <a href={`sms:${TWILIO_NUMBER}`}>{TWILIO_NUMBER}</a></>
+              ) : (
+                <> Text <strong>START</strong> to your stackd number</>
+              )}
+            </p>
+            <Link href="/" className="unsub-home">← Back to stackd.chat</Link>
+          </>
+        )}
+
+        {state === 'error' && (
+          <>
+            <div className="unsub-icon" aria-hidden="true">⚠</div>
+            <h1 className="unsub-h1">Link expired.</h1>
+            <p className="unsub-sub">This link has already been used or has expired.</p>
+            <p className="unsub-small">
+              Email <a href="mailto:support@stackd.chat">support@stackd.chat</a> if you need help.
+            </p>
+            <Link href="/" className="unsub-home">← Back to stackd.chat</Link>
+          </>
+        )}
+
+      </div>
+    </main>
+  );
+}
+
+export default function UnsubscribePage() {
   return (
     <>
       <style>{`
@@ -114,46 +159,15 @@ export default function UnsubscribePage() {
           <Link href="/" className="unsub-wordmark">stackd</Link>
         </nav>
 
-        <main className="unsub-main">
-          <div className="unsub-card">
-
-            {state === 'loading' && (
-              <>
-                <div className="unsub-spinner" role="status" aria-label="Processing" />
-                <p className="unsub-sub">One moment…</p>
-              </>
-            )}
-
-            {state === 'success' && (
-              <>
-                <div className="unsub-icon" aria-hidden="true">✓</div>
-                <h1 className="unsub-h1">You&apos;re unsubscribed.</h1>
-                <p className="unsub-sub">No more messages will be sent to your number.</p>
-                <p className="unsub-small">
-                  Changed your mind?{TWILIO_NUMBER ? (
-                    <> Text <strong>START</strong> to <a href={`sms:${TWILIO_NUMBER}`}>{TWILIO_NUMBER}</a></>
-                  ) : (
-                    <> Text <strong>START</strong> to your stackd number</>
-                  )}
-                </p>
-                <Link href="/" className="unsub-home">← Back to stackd.chat</Link>
-              </>
-            )}
-
-            {state === 'error' && (
-              <>
-                <div className="unsub-icon" aria-hidden="true">⚠</div>
-                <h1 className="unsub-h1">Link expired.</h1>
-                <p className="unsub-sub">This link has already been used or has expired.</p>
-                <p className="unsub-small">
-                  Email <a href="mailto:support@stackd.chat">support@stackd.chat</a> if you need help.
-                </p>
-                <Link href="/" className="unsub-home">← Back to stackd.chat</Link>
-              </>
-            )}
-
-          </div>
-        </main>
+        <Suspense fallback={
+          <main className="unsub-main">
+            <div className="unsub-card">
+              <div className="unsub-spinner" role="status" aria-label="Loading" />
+            </div>
+          </main>
+        }>
+          <UnsubscribeContent />
+        </Suspense>
       </div>
     </>
   );
