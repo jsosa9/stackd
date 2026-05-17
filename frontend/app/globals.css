@@ -397,7 +397,6 @@
     align-items: center;
   }
   .lp-phone-frame {
-    max-height: calc(100vh - 160px);
     box-shadow:
       0 0 0 1px rgba(26,22,18,0.10),
       -8px 24px 60px rgba(26,22,18,0.18),
@@ -451,12 +450,9 @@
   justify-content: center;
   align-items: flex-start;
   padding: 0 24px 40px;
-  overflow: hidden;
-  min-height: 0;
 }
 .lp-phone-frame {
   width: 272px;
-  max-height: calc(100vh - 300px);
   background: #18120D;
   border-radius: 48px;
   padding: 12px;

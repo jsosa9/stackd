@@ -185,20 +185,7 @@ export default function LandingPage() {
         }, 420);
       };
 
-      let touchStartX = 0, touchStartY = 0;
-      const onStackTouchStart = (e: TouchEvent) => {
-        touchStartX = e.touches[0].clientX;
-        touchStartY = e.touches[0].clientY;
-      };
-      const onStackTouchEnd = (e: TouchEvent) => {
-        const dx = e.changedTouches[0].clientX - touchStartX;
-        const dy = e.changedTouches[0].clientY - touchStartY;
-        if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 36) dismiss();
-      };
-
       stack.addEventListener('click', dismiss);
-      stack.addEventListener('touchstart', onStackTouchStart, { passive: true });
-      stack.addEventListener('touchend',   onStackTouchEnd);
       render(false);
 
       return () => {
@@ -214,8 +201,6 @@ export default function LandingPage() {
         }
         document.removeEventListener('keydown', onKeyDown);
         stack.removeEventListener('click', dismiss);
-        stack.removeEventListener('touchstart', onStackTouchStart);
-        stack.removeEventListener('touchend',   onStackTouchEnd);
       };
     }
 
@@ -359,7 +344,7 @@ export default function LandingPage() {
                   {FEATURES_SOON.map((f) => (
                     <div key={f.name} className="lp-feature-card soon">
                       <span className="lp-feature-pill">Soon</span>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--lp-ink)', marginBottom: 6, letterSpacing: '-0.01em' }}>{f.name}</div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--lp-ink)', marginBottom: 6, letterSpacing: '-0.01em', paddingRight: 36 }}>{f.name}</div>
                       <div style={{ fontSize: 12, color: 'rgba(26,22,18,0.46)', lineHeight: 1.45 }}>{f.desc}</div>
                     </div>
                   ))}
@@ -416,7 +401,7 @@ export default function LandingPage() {
             ))}
           </div>
           <p style={{ fontSize: 12, color: 'rgba(26,22,18,0.35)', marginTop: 24, textAlign: 'center', letterSpacing: '0.02em' }}>
-            Tap or swipe up to dismiss
+            Tap to dismiss
           </p>
         </div>
       </section>
