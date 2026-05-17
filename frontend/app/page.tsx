@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import LandingNavbar from '@/components/LandingNavbar';
 
 const SMS_URL = `sms:${process.env.NEXT_PUBLIC_TWILIO_NUMBER || '+15550000000'}&body=Hello`;
 
@@ -92,27 +93,11 @@ const COACHES = [
 ];
 
 export default function LandingPage() {
-  const navRef      = useRef<HTMLElement>(null);
   const trackRef    = useRef<HTMLDivElement>(null);
   const stackRef    = useRef<HTMLDivElement>(null);
   const [featPage, setFeatPage] = useState(0);
 
   useEffect(() => {
-    // ── Navbar scroll hide/show ──────────────────────────────────────
-    let lastY = 0;
-    const onScroll = () => {
-      const y = window.scrollY;
-      if (navRef.current) {
-        if (y > lastY && y > 80) {
-          navRef.current.classList.add('hidden');
-        } else {
-          navRef.current.classList.remove('hidden');
-        }
-      }
-      lastY = y;
-    };
-    window.addEventListener('scroll', onScroll, { passive: true });
-
     // ── Scroll reveal ────────────────────────────────────────────────
     const revEls = document.querySelectorAll<HTMLElement>('.reveal');
     const revObs = new IntersectionObserver(
@@ -217,7 +202,6 @@ export default function LandingPage() {
       render(false);
 
       return () => {
-        window.removeEventListener('scroll', onScroll);
         revObs.disconnect();
         if (pager) {
           pager.removeEventListener('touchstart', fTouchStart);
@@ -236,7 +220,6 @@ export default function LandingPage() {
     }
 
     return () => {
-      window.removeEventListener('scroll', onScroll);
       revObs.disconnect();
       if (pager) {
         pager.removeEventListener('touchstart', fTouchStart);
@@ -255,30 +238,32 @@ export default function LandingPage() {
     <div style={{ background: 'var(--lp-cream)', color: 'var(--lp-ink)', fontFamily: 'var(--font-dm-sans), -apple-system, sans-serif' }}>
 
       {/* ══ NAVBAR ══════════════════════════════════════════════ */}
-      <nav ref={navRef} className="lp-nav">
-        <span className="lp-nav-logo">stackd</span>
-        <a href={SMS_URL} className="lp-nav-pill">
-          {SMS_ICON}
-          Start now
-        </a>
-      </nav>
+      <LandingNavbar />
 
       {/* ══ HERO ════════════════════════════════════════════════ */}
       <section className="lp-hero">
-        <div className="lp-hero-inner">
-          <div className="lp-badge">
-            <span className="lp-badge-new">Free</span>
-            7-day trial · no credit card
+        <div className="lp-hero-body">
+          <div className="lp-hero-inner">
+            <div className="lp-badge">
+              <span className="lp-badge-new">Free</span>
+              7-day trial · no credit card
+            </div>
+            <h1 className="lp-h1">
+              The voice that drives you.<br />
+              <em>Texting you every day.</em>
+            </h1>
+            <p className="lp-sub">Name your inspiration. Share your goals. Get your first text in 60 seconds.</p>
+            <div className="lp-hero-cta">
+              <a href={SMS_URL} className="lp-btn-dark">
+                {SMS_ICON}
+                Get Started
+              </a>
+              <p style={{ fontSize: 12, color: 'rgba(26,22,18,0.33)', marginTop: 12 }}>No app. No login. Just text.</p>
+            </div>
           </div>
-          <h1 className="lp-h1">
-            The voice that drives you.<br />
-            <em>Texting you every day.</em>
-          </h1>
-          <p className="lp-sub">Name your inspiration. Share your goals. Get your first text in 60 seconds.</p>
-        </div>
 
-        {/* Phone mockup */}
-        <div className="lp-phone-wrap">
+          {/* Phone mockup */}
+          <div className="lp-phone-wrap">
           <div className="lp-phone-frame">
             <div className="lp-island" />
             <div className="lp-phone-inner">
@@ -313,14 +298,6 @@ export default function LandingPage() {
             </div>
           </div>
         </div>
-
-        {/* CTA */}
-        <div className="lp-hero-cta">
-          <a href={SMS_URL} className="lp-btn-dark">
-            {SMS_ICON}
-            Get Started
-          </a>
-          <p style={{ fontSize: 12, color: 'rgba(26,22,18,0.33)', marginTop: 12 }}>No app. No login. Just text.</p>
         </div>
       </section>
 
