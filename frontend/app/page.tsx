@@ -275,6 +275,14 @@ export default function LandingPage() {
             <em>Texting you every day.</em>
           </h1>
           <p className="lp-sub">Name your inspiration. Share your goals. Get your first text in 60 seconds.</p>
+          {/* CTA — inside hero-inner so it sits below text on desktop */}
+          <div className="lp-hero-cta">
+            <a href={SMS_URL} className="lp-btn-dark">
+              {SMS_ICON}
+              Get Started
+            </a>
+            <p style={{ fontSize: 12, color: 'rgba(26,22,18,0.33)', marginTop: 12 }}>No app. No login. Just text.</p>
+          </div>
         </div>
 
         {/* Phone mockup */}
@@ -314,14 +322,6 @@ export default function LandingPage() {
           </div>
         </div>
 
-        {/* CTA */}
-        <div className="lp-hero-cta">
-          <a href={SMS_URL} className="lp-btn-dark">
-            {SMS_ICON}
-            Get Started
-          </a>
-          <p style={{ fontSize: 12, color: 'rgba(26,22,18,0.33)', marginTop: 12 }}>No app. No login. Just text.</p>
-        </div>
       </section>
 
       <div className="lp-divider" />
