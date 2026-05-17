@@ -1213,9 +1213,8 @@ def check_missed_notifications() -> None:
         missed_res = (
             supabase.table("activity_notifications")
             .select(
-                "id, activity, scheduled_time, "
-                "users!inner(id, phone, name), "
-                "coach_settings!inner(coach_personality, coach_intensity, generated_system_prompt)"
+                "id, activity, scheduled_time, user_id, "
+                "users!inner(id, phone, name)"
             )
             .eq("state", "NOTIFIED")
             .lte("notified_at", cutoff)
@@ -1224,8 +1223,20 @@ def check_missed_notifications() -> None:
 
         for notif in missed_res.data or []:
             user = notif.get("users", {})
-            coach = notif.get("coach_settings", {})
-            user_id = user.get("id")
+            user_id = user.get("id") or notif.get("user_id")
+
+            # Fetch coach separately — no FK between activity_notifications and coach_settings
+            coach = {}
+            if user_id:
+                coach_res = (
+                    supabase.table("coach_settings")
+                    .select("coach_personality, coach_intensity, generated_system_prompt")
+                    .eq("user_id", user_id)
+                    .eq("is_active", True)
+                    .limit(1)
+                    .execute()
+                )
+                coach = coach_res.data[0] if coach_res.data else {}
             phone = user.get("phone")
 
             if not user_id or not phone:
