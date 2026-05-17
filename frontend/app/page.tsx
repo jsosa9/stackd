@@ -259,6 +259,12 @@ export default function LandingPage() {
                 Get Started
               </a>
               <p style={{ fontSize: 12, color: 'rgba(26,22,18,0.33)', marginTop: 12 }}>No app. No login. Just text.</p>
+              <p style={{ fontSize: 11, color: 'rgba(26,22,18,0.38)', marginTop: 10, lineHeight: 1.5, maxWidth: 320 }}>
+                By texting us, you agree to receive automated AI coaching SMS messages from stackd. ~20–30 msgs/month. Msg &amp; data rates may apply. Reply STOP to cancel, HELP for info.{' '}
+                <a href="https://stackd-liart.vercel.app/privacy" style={{ color: 'rgba(26,22,18,0.45)', textDecoration: 'underline' }}>Privacy</a>
+                {' · '}
+                <a href="https://stackd-liart.vercel.app/terms" style={{ color: 'rgba(26,22,18,0.45)', textDecoration: 'underline' }}>Terms</a>
+              </p>
             </div>
           </div>
 
