@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import os
+import random
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -28,6 +30,10 @@ _otp_store: dict[str, dict] = {}
 OTP_TTL_SECONDS = 300   # code expires after 5 minutes
 OTP_MAX_ATTEMPTS = 5    # lock out after 5 wrong guesses
 
+# In-memory rate limiter: { phone: { count, window_start } }
+_rate_store: dict[str, dict] = {}
+_RATE_PER_MINUTE = 5  # >5 msgs/min = bot/spam; real split-texters won't hit this
+
 # ---------------------------------------------------------------------------
 # Client setup
 # ---------------------------------------------------------------------------
@@ -52,6 +58,28 @@ validator = RequestValidator(os.getenv("TWILIO_AUTH_TOKEN"))
 def _extract_link_token(body: str) -> str | None:
     cleaned = body.strip().upper()
     return cleaned if re.match(r'^STK-[A-Z0-9]{4}$', cleaned) else None
+
+
+async def _typing_delay(text: str) -> None:
+    """Simulate human typing time based on message length before sending."""
+    base = 2.0
+    length_bonus = min(len(text) / 200, 2.0)  # up to 2 extra seconds for longer messages
+    jitter = random.uniform(0.0, 0.6)
+    await asyncio.sleep(base + length_bonus + jitter)
+
+
+def _is_rate_limited(phone: str) -> bool:
+    now = datetime.now(timezone.utc)
+    entry = _rate_store.get(phone)
+    if entry is None:
+        _rate_store[phone] = {"count": 1, "window_start": now}
+        return False
+    if (now - entry["window_start"]).total_seconds() > 60:
+        entry["count"] = 1
+        entry["window_start"] = now
+        return False
+    entry["count"] += 1
+    return entry["count"] > _RATE_PER_MINUTE
 
 
 def _twiml_reply(message: str) -> Response:
@@ -255,6 +283,7 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
                     _save_message(uid, "outbound", ctia_welcome)
                     from routes.mock import send_welcome_message
                     welcome = await send_welcome_message(uid)
+                    await _typing_delay(f"{ctia_welcome}\n\n{welcome}")
                     return _twiml_reply(f"{ctia_welcome}\n\n{welcome}")
         except Exception:
             logger.exception(f"Link token activation failed for token {link_token}")
@@ -308,6 +337,11 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
             "Reply STOP anytime to cancel."
         )
 
+    # Rate limit — STOP/HELP/START bypass above, everything else checked here
+    if _is_rate_limited(from_number):
+        logger.warning(f"Rate limit hit for {from_number} — dropping message")
+        return Response(content="", media_type="application/xml")
+
     # Look up user by phone number with schedule and coach settings
     user_res = (
         supabase.table("users")
@@ -324,6 +358,7 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
             from_number, message_body, background_tasks, supabase, user_data
         )
         if onboarding_reply is not None:
+            await _typing_delay(onboarding_reply)
             return _twiml_reply(onboarding_reply)
         # If None returned, onboarding is complete — fall through to normal pipeline
         # Re-fetch user_data in case it was just created
@@ -364,6 +399,7 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
                     f"Notification reply {notif_state} for {notif_row['activity']} "
                     f"from {from_number}: {response_text[:80]}"
                 )
+                await _typing_delay(response_text)
                 return _twiml_reply(response_text)
     except Exception:
         logger.exception(f"Notification reply intercept failed for user {user_id} — falling through to Gemini")
@@ -380,6 +416,7 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
 
     _save_message(user_id, "outbound", response_text)
     logger.info(f"Outbound SMS to {from_number}: {response_text[:80]}")
+    await _typing_delay(response_text)
     return _twiml_reply(response_text)
 
 

@@ -2,6 +2,7 @@ import logging
 import os
 import asyncio
 import json
+import random
 from datetime import datetime, timedelta, date
 from fastapi import APIRouter
 from supabase import create_client
@@ -87,7 +88,12 @@ scheduler = BackgroundScheduler()
 # ---------------------------------------------------------------------------
 
 def send_sms(to: str, body: str) -> None:
-    """Send an SMS via Twilio and log the result."""
+    """Send an SMS via Twilio with a human-like typing delay scaled to message length."""
+    import time
+    base = 2.0
+    length_bonus = min(len(body) / 200, 2.0)
+    jitter = random.uniform(0.0, 0.6)
+    time.sleep(base + length_bonus + jitter)
     try:
         msg = twilio_client.messages.create(body=body, from_=TWILIO_FROM, to=to)
         logger.info(f"Sent SMS to {to}: sid={msg.sid}")
