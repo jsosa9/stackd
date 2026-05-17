@@ -565,7 +565,32 @@ Return only the system prompt text. No preamble, no explanation, no labels. Just
     try:
         _coach_model = genai.GenerativeModel(model_name="gemini-2.5-flash-lite")
         _coach_resp = _coach_model.generate_content(haiku_prompt)
-        generated_prompt = _coach_resp.text.strip()
+        raw_prompt = _coach_resp.text.strip()
+
+        # Prepend mandatory philosophy-not-identity prefix (Right of Publicity + AI disclosure compliance)
+        sounds_like_name = coach.get("custom_coach_sounds_like") or coach.get("coach_sounds_like") or ""
+        if sounds_like_name and sounds_like_name.lower() not in ("", "none", "n/a"):
+            _identity_prefix = (
+                f"You are an elite accountability coach built around the philosophy, standards, "
+                f"and mental framework associated with {sounds_like_name}. "
+                f"You are not {sounds_like_name} and will never claim to be or imply you are the real person. "
+                f"You embody their publicly known principles — not their identity. "
+                f"If the user directly and sincerely asks whether you are a real person or an AI, "
+                f"acknowledge that you are an AI coach inspired by this philosophy. "
+                f"Do not volunteer this in normal conversation. "
+                f"Never make specific false factual claims about {sounds_like_name}. "
+                f"Never use first-person statements that only the real person could make "
+                f"(e.g., specific personal events, private experiences, biographical details).\n\n"
+            )
+        else:
+            _identity_prefix = (
+                "You are an AI accountability coach. You are not a real person. "
+                "If the user directly and sincerely asks whether you are an AI, acknowledge it. "
+                "Do not volunteer this in normal conversation. "
+                "Never make specific false factual claims about any real person.\n\n"
+            )
+
+        generated_prompt = _identity_prefix + raw_prompt
         logger.info(f"Generated system prompt for user {user_id} ({len(generated_prompt)} chars)")
 
         # Save to coach_settings with personality_id and version

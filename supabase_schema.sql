@@ -413,6 +413,11 @@ ALTER TABLE public.users ADD COLUMN is_paid BOOLEAN DEFAULT FALSE;
 ALTER TABLE public.users ADD COLUMN onboarding_step INTEGER DEFAULT 0;
 ALTER TABLE public.users ADD COLUMN stripe_customer_id TEXT;
 
+-- TCPA compliance: consent recording (required before any outbound SMS is sent)
+-- sms_consent_method values: 'stk_token' | 'quiz_onboarding' | 'web_form'
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS sms_consent_given_at TIMESTAMPTZ;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS sms_consent_method TEXT;
+
 -- FIX 1: Create activity_notifications table
 CREATE TABLE public.activity_notifications (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

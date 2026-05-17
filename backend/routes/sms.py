@@ -241,59 +241,72 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
                     uid = entry["user_id"]
                     supabase.table("users").update({"phone": from_number}).eq("id", uid).execute()
                     supabase.table("phone_link_tokens").update({"used": True}).eq("token", link_token).execute()
+                    # Record TCPA consent immediately after phone linking
+                    supabase.table("users").update({
+                        "sms_consent_given_at": datetime.now(timezone.utc).isoformat(),
+                        "sms_consent_method": "stk_token",
+                    }).eq("id", uid).execute()
+                    # CTIA-required welcome message must be sent before any coach message
+                    ctia_welcome = (
+                        "stackd: You're now set up for daily AI coaching texts. ~20-30 msgs/month. "
+                        "Msg&Data rates may apply. Reply STOP to cancel anytime, HELP for info. "
+                        "stackd.app/help"
+                    )
+                    _save_message(uid, "outbound", ctia_welcome)
                     from routes.mock import send_welcome_message
                     welcome = await send_welcome_message(uid)
-                    return _twiml_reply(welcome)
+                    return _twiml_reply(f"{ctia_welcome}\n\n{welcome}")
         except Exception:
             logger.exception(f"Link token activation failed for token {link_token}")
         return _twiml_reply("That code wasn't recognized. Try again or visit the app.")
 
-    # STOP / START keyword intercept — must run before user lookup and onboarding
-    _msg_upper = message_body.strip().upper()
+    # STOP / HELP / START keyword intercept — TCPA/CTIA compliance
+    # Must run before user lookup, onboarding, and all other processing.
+    _normalized = message_body.strip().lower()
+    _STOP_WORDS  = {"stop", "stopall", "unsubscribe", "cancel", "end", "quit"}
+    _HELP_WORDS  = {"help", "info"}
+    _START_WORDS = {"start", "unstop", "yes"}
 
-    if _msg_upper == "STOP":
+    if _normalized in _STOP_WORDS:
+        # TCPA requires immediate unsubscribe — no link, no friction
         try:
             _stop_res = supabase.table("users").select("id").eq("phone", from_number).execute()
             if _stop_res.data:
-                uid = _stop_res.data[0]["id"]
-                token = "STK-" + "".join(
-                    secrets.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for _ in range(4)
-                )
-                expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
-                supabase.table("phone_link_tokens").insert({
-                    "user_id": uid,
-                    "token": token,
-                    "used": False,
-                    "expires_at": expires_at,
-                }).execute()
-                logger.info(f"STOP token {token} created for {from_number}")
-                return _twiml_reply(
-                    f"To unsubscribe tap this link. "
-                    f"It expires in 24 hours.\n"
-                    f"stackd.chat/unsubscribe?token={token}"
-                )
+                supabase.table("users").update({"paused": True}).eq("phone", from_number).execute()
+                logger.info(f"User {from_number} opted out via STOP")
         except Exception:
-            logger.exception(f"Failed to create unsubscribe token for {from_number}")
+            logger.exception(f"Failed to pause user on STOP from {from_number}")
         return _twiml_reply(
-            "To unsubscribe email support@stackd.chat with your phone number."
+            "You've been unsubscribed from stackd. No further messages will be sent. "
+            "Reply START to resubscribe."
         )
 
-    if _msg_upper in ("START", "UNSTOP"):
+    if _normalized in _HELP_WORDS:
+        # CTIA requires: program name, support contact, STOP instruction, info link
+        return _twiml_reply(
+            "stackd AI coaching app. ~20-30 msgs/month. Msg&Data rates may apply. "
+            "Reply STOP to cancel anytime. Support: help@stackd.app stackd.app/help"
+        )
+
+    if _normalized in _START_WORDS:
         try:
             _start_res = supabase.table("users").select("id").eq("phone", from_number).execute()
             if _start_res.data:
-                supabase.table("users").update({"paused": False}).eq("phone", from_number).execute()
-                logger.info(f"User {from_number} resubscribed via {_msg_upper}")
+                _uid = _start_res.data[0]["id"]
+                supabase.table("users").update({"paused": False}).eq("id", _uid).execute()
+                logger.info(f"User {from_number} resubscribed via START")
+                _start_welcome = (
+                    "Welcome back to stackd! You're resubscribed for daily coaching texts. "
+                    "~20-30 msgs/month. Reply STOP anytime to cancel."
+                )
+                _save_message(_uid, "outbound", _start_welcome)
+                return _twiml_reply(_start_welcome)
         except Exception:
-            logger.exception(f"Failed to unpause user {from_number} on {_msg_upper}")
+            logger.exception(f"Failed to unpause user {from_number} on START")
         return _twiml_reply(
-            "You have been resubscribed to stackd. "
-            "Your coach will resume texting you. "
-            "Text STOP at any time to unsubscribe."
+            "Welcome back to stackd! You're resubscribed for daily coaching texts. "
+            "Reply STOP anytime to cancel."
         )
-
-    if _msg_upper == "HELP":
-        return _twiml_reply("stackd Help\nstackd.chat/help")
 
     # Look up user by phone number with schedule and coach settings
     user_res = (

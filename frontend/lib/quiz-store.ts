@@ -11,6 +11,7 @@ export interface CoachData {
   coachMissBehavior: string;
   coachIntensity: number;
   customCoachAvoidPhrases: string;
+  age: number | null;
 }
 
 const defaults: CoachData = {
@@ -21,6 +22,7 @@ const defaults: CoachData = {
   coachMissBehavior: '',
   coachIntensity: 3,
   customCoachAvoidPhrases: '',
+  age: null,
 };
 
 interface QuizStore {

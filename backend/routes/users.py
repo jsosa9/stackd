@@ -215,3 +215,25 @@ async def get_user_profile(user_id: str):
         "schedule": sched_res.data[0] if sched_res.data else None,
         "goals": goals_res.data or [],
     }
+
+
+@router.delete("/{user_id}")
+async def delete_account(user_id: str):
+    """
+    Hard delete the user and all associated data (cascades via FK constraints).
+    Pauses SMS first to stop any in-flight scheduled messages before deletion.
+    """
+    user_res = supabase.table("users").select("id").eq("id", user_id).execute()
+    if not user_res.data:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    try:
+        # Pause first — prevents any scheduled job firing between now and deletion
+        supabase.table("users").update({"paused": True}).eq("id", user_id).execute()
+        # Hard delete — FK CASCADE removes all child rows automatically
+        supabase.table("users").delete().eq("id", user_id).execute()
+        logger.info(f"Account deleted for user {user_id}")
+        return {"deleted": True}
+    except Exception as e:
+        logger.exception(f"Account deletion failed for user {user_id}")
+        raise HTTPException(status_code=500, detail="Deletion failed")

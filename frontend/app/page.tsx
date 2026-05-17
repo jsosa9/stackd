@@ -420,8 +420,11 @@ export default function LandingPage() {
       {/* ══ COACHES CAROUSEL ════════════════════════════════════ */}
       <section className="lp-section" style={{ padding: '100px 0', background: 'var(--lp-warm)', overflow: 'hidden' }}>
         <div style={{ maxWidth: 1100, margin: '0 auto', padding: '0 28px' }}>
-          <span className="lp-eyebrow reveal" style={{ marginBottom: 12, display: 'block' }}>You name them. We build them.</span>
+          <span className="lp-eyebrow reveal" style={{ marginBottom: 12, display: 'block' }}>You name the philosophy. We build the coach.</span>
           <h2 className="lp-h2 reveal" style={{ marginBottom: 12 }}>Any voice. <em>Any philosophy.</em></h2>
+          <p style={{ fontSize: 12, color: 'rgba(26,22,18,0.4)', marginBottom: 16 }}>
+            AI coaches inspired by public figures. Not affiliated with or endorsed by them.
+          </p>
           <p className="reveal" style={{ fontSize: 15, color: 'rgba(26,22,18,0.4)', lineHeight: 1.6, marginBottom: 44 }}>
             Text any name. Athlete, founder, artist, anyone who drives you. We study how they think and build your coach from their philosophy and standards.
           </p>
@@ -450,10 +453,11 @@ export default function LandingPage() {
           </h2>
           <div className="lp-price-card reveal">
             <div className="lp-price-num">Free</div>
-            <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.28)', marginBottom: 24 }}>for 7 days · then $9.99 / month</div>
+            <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.28)', marginBottom: 8 }}>Free for 7 days · then $9.99/month, auto-renews monthly.</div>
+            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.18)', marginBottom: 24 }}>Charged at end of trial. Cancel anytime before trial ends to avoid charge.</div>
             <div className="lp-price-hr" />
             <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 11, marginBottom: 28 }}>
-              {['Unlimited daily texts', 'Any coach you can name', 'No app, no login', 'Cancel anytime'].map((item) => (
+              {['~20–30 coaching texts/month', 'Any coach you can name', 'No app, no login', 'Cancel anytime'].map((item) => (
                 <li key={item} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 14, color: 'rgba(255,255,255,0.55)' }}>
                   <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--lp-tan)', flexShrink: 0, display: 'inline-block' }} />
                   {item}

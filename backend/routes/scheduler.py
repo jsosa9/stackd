@@ -137,7 +137,7 @@ def send_scheduled_checkins() -> None:
 
     # Fetch all users with their schedule preferences joined
     schedules_res = supabase.table("schedule").select(
-        "user_id, checkin_time, timezone, users(id, phone, name, paused)"
+        "user_id, checkin_time, timezone, users(id, phone, name, paused, sms_consent_given_at)"
     ).execute()
 
     now_utc = datetime.utcnow()
@@ -147,6 +147,9 @@ def send_scheduled_checkins() -> None:
         if not user or not user.get("phone"):
             continue
         if user.get("paused"):
+            continue
+        if not user.get("sms_consent_given_at"):
+            logger.info(f"Skipping check-in — user {user.get('id')} has no consent record")
             continue
 
         user_id = user["id"]
@@ -227,7 +230,7 @@ def send_motivation_messages() -> None:
     schedules_res = supabase.table("schedule").select(
         "user_id, motivation_enabled, motivation_frequency, "
         "motivation_window_start, motivation_window_end, timezone, "
-        "users(id, phone, name, paused)"
+        "users(id, phone, name, paused, sms_consent_given_at)"
     ).eq("motivation_enabled", True).execute()
 
     now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
@@ -237,6 +240,9 @@ def send_motivation_messages() -> None:
         if not user or not user.get("phone"):
             continue
         if user.get("paused"):
+            continue
+        if not user.get("sms_consent_given_at"):
+            logger.info(f"Skipping motivation — user {user.get('id')} has no consent record")
             continue
 
         user_id = user["id"]
@@ -326,24 +332,30 @@ def send_scheduled_reminders() -> None:
         # Query unsent reminders scheduled for now or earlier
         reminders_res = (
             supabase.table("reminders")
-            .select("*, users(phone, name)")
+            .select("*, users(id, phone, name, paused, sms_consent_given_at)")
             .eq("sent", False)
             .lte("scheduled_for", now_utc)
             .execute()
         )
-        
+
         if not reminders_res.data:
             return
-        
+
         scheduler_logger.info(f"Found {len(reminders_res.data)} unsent reminders to deliver")
-        
+
         for reminder in reminders_res.data:
             user = reminder.get("users", {})
             phone = user.get("phone")
             reminder_id = reminder["id"]
-            
+
             if not phone:
                 scheduler_logger.warning(f"Reminder {reminder_id} has no phone number — skipping")
+                continue
+            if user.get("paused"):
+                scheduler_logger.info(f"Skipping reminder {reminder_id} — user is paused")
+                continue
+            if not user.get("sms_consent_given_at"):
+                scheduler_logger.info(f"Skipping reminder {reminder_id} — user has no consent record")
                 continue
             
             try:
@@ -387,23 +399,29 @@ def send_deadline_checkins() -> None:
         # Query all active deadlines
         deadlines_res = (
             supabase.table("deadlines")
-            .select("*, users(id, phone, name), coach_settings(generated_system_prompt)")
+            .select("*, users(id, phone, name, paused, sms_consent_given_at), coach_settings(generated_system_prompt)")
             .eq("active", True)
             .eq("daily_checkin", True)
             .execute()
         )
-        
+
         if not deadlines_res.data:
             return
-        
+
         scheduler_logger.info(f"Sending deadline check-ins to {len(deadlines_res.data)} users")
-        
+
         for deadline in deadlines_res.data:
             user = deadline.get("users", {})
             phone = user.get("phone")
             user_id = user.get("id")
-            
+
             if not phone or not user_id:
+                continue
+            if user.get("paused"):
+                scheduler_logger.info(f"Skipping deadline check-in — user {user_id} is paused")
+                continue
+            if not user.get("sms_consent_given_at"):
+                scheduler_logger.info(f"Skipping deadline check-in — user {user_id} has no consent record")
                 continue
             
             try:
@@ -633,7 +651,7 @@ def send_proactive_pattern_messages() -> None:
         # Query high-confidence patterns
         patterns_res = (
             supabase.table("habit_patterns")
-            .select("*, users(id, phone, name, schedule(timezone))")
+            .select("*, users(id, phone, name, paused, sms_consent_given_at, schedule(timezone))")
             .eq("active", True)
             .gte("confidence", 3)
             .execute()
@@ -651,10 +669,16 @@ def send_proactive_pattern_messages() -> None:
             user = pattern.get("users", {})
             user_id = user.get("id")
             phone = user.get("phone")
-            
+
             if not user_id or not phone:
                 continue
-            
+            if user.get("paused"):
+                scheduler_logger.info(f"Skipping proactive message — user {user_id} is paused")
+                continue
+            if not user.get("sms_consent_given_at"):
+                scheduler_logger.info(f"Skipping proactive message — user {user_id} has no consent record")
+                continue
+
             try:
                 # Check if pattern matches today
                 pattern_day = pattern.get("day_of_week")
@@ -759,12 +783,12 @@ def send_milestone_celebrations() -> None:
         # Fetch all streaks that hit milestones
         streaks_res = (
             supabase.table("streaks")
-            .select("*, users(id, phone, name), goals(activity), coach_settings(generated_system_prompt)")
+            .select("*, users(id, phone, name, paused, sms_consent_given_at), goals(activity), coach_settings(generated_system_prompt)")
             .execute()
         )
-        
+
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        
+
         for streak in (streaks_res.data or []):
             current = streak.get("current_streak", 0)
             
@@ -776,10 +800,16 @@ def send_milestone_celebrations() -> None:
             goal = streak.get("goals", {})
             user_id = user.get("id")
             phone = user.get("phone")
-            
+
             if not user_id or not phone:
                 continue
-            
+            if user.get("paused"):
+                streaks_logger.info(f"Skipping milestone — user {user_id} is paused")
+                continue
+            if not user.get("sms_consent_given_at"):
+                streaks_logger.info(f"Skipping milestone — user {user_id} has no consent record")
+                continue
+
             try:
                 # Check if we already celebrated this milestone today
                 today_msgs = (
@@ -865,15 +895,17 @@ def send_weekly_reflections() -> None:
         users_res = (
             supabase.table("users")
             .select("*, coach_settings(generated_system_prompt), schedule(timezone)")
+            .eq("paused", False)
+            .not_.is_("sms_consent_given_at", "null")
             .execute()
         )
-        
+
         scheduler_logger.info(f"Sending Sunday reflections to {len(users_res.data or [])} users")
-        
+
         for user in (users_res.data or []):
             user_id = user["id"]
             phone = user.get("phone")
-            
+
             if not phone:
                 continue
             
@@ -961,7 +993,7 @@ def detect_silent_users() -> None:
         now_utc = datetime.now(pytz.UTC)
         
         # Fetch all users
-        users_res = supabase.table("users").select("id, phone, name, paused").execute()
+        users_res = supabase.table("users").select("id, phone, name, paused, sms_consent_given_at").execute()
 
         for user in (users_res.data or []):
             user_id = user["id"]
@@ -969,7 +1001,8 @@ def detect_silent_users() -> None:
 
             if user.get("paused"):
                 continue
-
+            if not user.get("sms_consent_given_at"):
+                continue
             if not phone:
                 continue
             
@@ -1067,12 +1100,16 @@ def send_activity_notifications() -> None:
 
     try:
         schedules_res = supabase.table("schedule").select(
-            "user_id, timezone, users(id, phone, name)"
+            "user_id, timezone, users(id, phone, name, paused, sms_consent_given_at)"
         ).execute()
 
         for sched in schedules_res.data or []:
             user = sched.get("users")
             if not user or not user.get("phone"):
+                continue
+            if user.get("paused"):
+                continue
+            if not user.get("sms_consent_given_at"):
                 continue
 
             user_id = user["id"]
@@ -1214,7 +1251,7 @@ def check_missed_notifications() -> None:
             supabase.table("activity_notifications")
             .select(
                 "id, activity, scheduled_time, user_id, "
-                "users!inner(id, phone, name)"
+                "users!inner(id, phone, name, paused, sms_consent_given_at)"
             )
             .eq("state", "NOTIFIED")
             .lte("notified_at", cutoff)
@@ -1240,6 +1277,10 @@ def check_missed_notifications() -> None:
             phone = user.get("phone")
 
             if not user_id or not phone:
+                continue
+            if user.get("paused"):
+                continue
+            if not user.get("sms_consent_given_at"):
                 continue
 
             try:

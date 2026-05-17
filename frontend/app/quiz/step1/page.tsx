@@ -48,11 +48,14 @@ export default function Step1() {
   const [missBehavior, setMissBehavior] = useState('');
   const [intensity, setIntensity] = useState(3);
   const [avoidPhrases, setAvoidPhrases] = useState('');
+  const [age, setAge] = useState('');
+  const [ageError, setAgeError] = useState('');
 
+  const isOldEnough = age === '' || Number(age) >= 18;
   const canContinue =
-    mode === 'celebrity' ? celebrityName.trim().length > 0
+    (mode === 'celebrity' ? celebrityName.trim().length > 0
     : mode === 'custom'  ? personalityDesc.trim().length > 0
-    : false;
+    : false) && age.trim().length > 0 && isOldEnough;
 
   function handlePillClick(name: string) {
     setSelectedPill(name);
@@ -68,7 +71,22 @@ export default function Step1() {
     setTalkStyle((prev) => prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]);
   }
 
+  function handleAgeChange(val: string) {
+    setAge(val);
+    const n = Number(val);
+    if (val && n < 18) {
+      setAgeError('stackd is only available to users 18 and older.');
+    } else {
+      setAgeError('');
+    }
+  }
+
   function handleContinue() {
+    const n = Number(age);
+    if (!age || n < 18) {
+      setAgeError('stackd is only available to users 18 and older.');
+      return;
+    }
     patch({
       coachSetupMode: mode as 'celebrity' | 'custom',
       celebrityName,
@@ -77,6 +95,7 @@ export default function Step1() {
       coachMissBehavior: missBehavior,
       coachIntensity: intensity,
       customCoachAvoidPhrases: avoidPhrases,
+      age: n,
     });
     router.push('/quiz/step2');
   }
@@ -419,6 +438,12 @@ export default function Step1() {
                     <Pill key={name} label={name} active={selectedPill === name} onClick={() => handlePillClick(name)} />
                   ))}
                 </div>
+                {celebrityName.trim().length > 0 && (
+                  <p style={{ fontSize: 11, color: 'rgba(107,122,141,0.8)', marginTop: 12, lineHeight: 1.5 }}>
+                    Your coach is an AI built around the philosophy and standards {celebrityName} is known for.
+                    stackd is not affiliated with, endorsed by, or representative of {celebrityName}.
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -484,6 +509,24 @@ export default function Step1() {
               </div>
             </div>
           )}
+
+          {/* Age gate — required for COPPA/TCPA compliance */}
+          <div style={{ marginBottom: 16 }}>
+            <label className="s1-label" style={{ display: 'block', marginBottom: 8 }}>Your age</label>
+            <input
+              className="s1-input"
+              type="number"
+              min={1}
+              max={120}
+              value={age}
+              onChange={(e) => handleAgeChange(e.target.value)}
+              placeholder="Enter your age"
+              style={{ width: 140 }}
+            />
+            {ageError && (
+              <p style={{ fontSize: 12, color: '#ff6b6b', marginTop: 8 }}>{ageError}</p>
+            )}
+          </div>
 
           <button
             onClick={handleContinue}
