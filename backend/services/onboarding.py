@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 import google.generativeai as genai
 from dotenv import load_dotenv
-from twilio.rest import Client as TwilioClient
+from sent_dm import Sent
 
 from routes.personas import persona_manager
 from services.message_router import _generate_voice_reply
@@ -32,11 +32,8 @@ logger = logging.getLogger("onboarding")
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-_twilio = TwilioClient(
-    os.getenv("TWILIO_ACCOUNT_SID"),
-    os.getenv("TWILIO_AUTH_TOKEN"),
-)
-TWILIO_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+_sent = Sent(api_key=os.getenv("SENT_API_KEY"))
+_SENT_TEMPLATE_ID = os.getenv("SENT_SMS_TEMPLATE_ID", "")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -73,7 +70,15 @@ def _parse_days(text: str) -> list[str]:
 
 def _send_sms(to: str, body: str) -> None:
     try:
-        _twilio.messages.create(body=body, from_=TWILIO_NUMBER, to=to)
+        _sent.messages.send(
+            to=[to],
+            template={
+                "id": _SENT_TEMPLATE_ID,
+                "name": "sms_reply",
+                "parameters": {"text": body},
+            },
+            channel=["sms"],
+        )
     except Exception:
         logger.exception(f"Failed to send SMS to {to}")
 

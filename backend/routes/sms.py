@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import logging
 import os
 import random
@@ -7,9 +10,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, BackgroundTasks, Request, Response, HTTPException
 from pydantic import BaseModel
-from twilio.twiml.messaging_response import MessagingResponse
-from twilio.request_validator import RequestValidator
-from twilio.rest import Client as TwilioClient
+from sent_dm import AsyncSent
 from supabase import create_client
 from dotenv import load_dotenv
 
@@ -43,12 +44,74 @@ supabase = create_client(
     os.getenv("SUPABASE_SERVICE_ROLE_KEY"),
 )
 
-twilio_client = TwilioClient(
-    os.getenv("TWILIO_ACCOUNT_SID"),
-    os.getenv("TWILIO_AUTH_TOKEN"),
-)
+# Sent.dm async client — initialized lazily to avoid event-loop issues at import time
+_sent_client: AsyncSent | None = None
 
-validator = RequestValidator(os.getenv("TWILIO_AUTH_TOKEN"))
+
+def _get_sent_client() -> AsyncSent:
+    global _sent_client
+    if _sent_client is None:
+        _sent_client = AsyncSent(api_key=os.getenv("SENT_API_KEY"))
+    return _sent_client
+
+
+# ---------------------------------------------------------------------------
+# Webhook signature verification (Sent.dm HMAC-SHA256)
+# Docs: https://docs.sent.dm/start/webhooks/signature-verification
+#   Header: x-webhook-signature  → "v1,<base64-encoded-sig>"
+#   Header: x-webhook-id         → webhook endpoint id
+#   Header: x-webhook-timestamp  → unix seconds
+#   Signed content: "{webhookId}.{timestamp}.{rawBody}"
+#   Key: base64-decode(secret after stripping "whsec_" prefix)
+# ---------------------------------------------------------------------------
+
+_WEBHOOK_TIMESTAMP_TOLERANCE = 300  # 5 minutes
+
+
+def _verify_sent_signature(
+    raw_body: bytes,
+    webhook_id: str,
+    timestamp: str,
+    signature_header: str,
+) -> bool:
+    secret = os.getenv("SENT_WEBHOOK_SECRET", "")
+    if not secret:
+        logger.warning("SENT_WEBHOOK_SECRET not set — skipping signature verification")
+        return True
+
+    # Strip "whsec_" prefix and base64-decode to get raw key bytes
+    stripped = secret.removeprefix("whsec_")
+    try:
+        key_bytes = base64.b64decode(stripped)
+    except Exception:
+        logger.error("Failed to decode SENT_WEBHOOK_SECRET — invalid base64")
+        return False
+
+    # Validate timestamp to prevent replay attacks
+    try:
+        ts_int = int(timestamp)
+        now = int(datetime.now(timezone.utc).timestamp())
+        if abs(now - ts_int) > _WEBHOOK_TIMESTAMP_TOLERANCE:
+            logger.warning("Sent.dm webhook timestamp too old — possible replay attack")
+            return False
+    except (ValueError, TypeError):
+        logger.warning("Invalid x-webhook-timestamp header")
+        return False
+
+    # Build signed content and compute expected HMAC-SHA256
+    signed_content = f"{webhook_id}.{timestamp}.{raw_body.decode('utf-8', errors='replace')}".encode()
+    expected = base64.b64encode(
+        hmac.new(key_bytes, signed_content, hashlib.sha256).digest()
+    ).decode()
+
+    # Header format: "v1,<base64sig>"
+    try:
+        _, received = signature_header.split(",", 1)
+    except ValueError:
+        logger.warning("Malformed x-webhook-signature header")
+        return False
+
+    return hmac.compare_digest(expected, received)
 
 
 # ---------------------------------------------------------------------------
@@ -82,11 +145,27 @@ def _is_rate_limited(phone: str) -> bool:
     return entry["count"] > _RATE_PER_MINUTE
 
 
-def _twiml_reply(message: str) -> Response:
-    """Return a TwiML XML response that sends an SMS back to the user."""
-    twiml = MessagingResponse()
-    twiml.message(message)
-    return Response(content=str(twiml), media_type="application/xml")
+async def _send_reply(to: str, message: str) -> None:
+    """
+    Send an outbound SMS via Sent.dm SDK and return a plain 200.
+    Replaces the old TwiML-based _twiml_reply().
+    """
+    template_id = os.getenv("SENT_SMS_TEMPLATE_ID", "")
+    sent_number = os.getenv("SENT_PHONE_NUMBER", "")
+    client = _get_sent_client()
+    try:
+        resp = await client.messages.send(
+            to=[to],
+            template={
+                "id": template_id,
+                "name": "sms_reply",
+                "parameters": {"text": message},
+            },
+            channel=["sms"],
+        )
+        logger.info(f"Sent.dm message dispatched to {to}: {resp}")
+    except Exception:
+        logger.exception(f"Failed to send Sent.dm message to {to}")
 
 
 def _save_message(user_id: str, direction: str, body: str) -> None:
@@ -223,11 +302,11 @@ async def handle_notification_reply(
 @router.post("/incoming")
 async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
     """
-    Twilio webhook — thin wrapper around process_inbound_sms().
+    Sent.dm webhook — thin wrapper around process_inbound_sms().
 
     Responsibilities here:
-      1. Twilio signature validation
-      2. Parse From number and Body
+      1. Sent.dm HMAC-SHA256 signature validation
+      2. Parse from number and text from JSON payload
       3. Link token intercept (STK-XXXX activation)
       4. User lookup by phone number
       5. Unknown number handling
@@ -235,20 +314,35 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
       7. Notification reply intercept (CONFIRMED/DECLINED/RESCHEDULED)
       8. Delegate to process_inbound_sms() for all routing/classification/voice
       9. Save outbound message
-     10. Return TwiML reply
+     10. Send reply via Sent.dm SDK and return plain 200
     """
-    form_data = await request.form()
-    url = str(request.url)
-    signature = request.headers.get("X-Twilio-Signature", "")
+    raw_body = await request.body()
 
-    # Validate Twilio signature in production
+    # Sent.dm signature headers
+    webhook_id = request.headers.get("x-webhook-id", "")
+    timestamp = request.headers.get("x-webhook-timestamp", "")
+    signature = request.headers.get("x-webhook-signature", "")
+
+    # Validate Sent.dm signature in production
     if os.getenv("ENV", "development") != "development":
-        if not validator.validate(url, dict(form_data), signature):
-            logger.warning("Invalid Twilio signature — rejecting request")
-            raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+        if not _verify_sent_signature(raw_body, webhook_id, timestamp, signature):
+            logger.warning("Invalid Sent.dm webhook signature — rejecting request")
+            raise HTTPException(status_code=403, detail="Invalid Sent.dm signature")
 
-    from_number = form_data.get("From", "").strip()
-    message_body = form_data.get("Body", "").strip()
+    # Parse JSON payload
+    # Sent.dm inbound event structure:
+    #   { "field": "message", "sub_type": "message.received",
+    #     "payload": { "from": "+1...", "text": "...", "channel": "sms", ... } }
+    try:
+        import json as _json
+        data = _json.loads(raw_body)
+    except Exception:
+        logger.warning("Failed to parse Sent.dm webhook JSON body")
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    payload = data.get("payload", {})
+    from_number = (payload.get("from") or "").strip()
+    message_body = (payload.get("text") or "").strip()
 
     logger.info(f"Inbound SMS from {from_number}: {message_body[:80]}")
 
@@ -284,10 +378,12 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
                     from routes.mock import send_welcome_message
                     welcome = await send_welcome_message(uid)
                     await _typing_delay(f"{ctia_welcome}\n\n{welcome}")
-                    return _twiml_reply(f"{ctia_welcome}\n\n{welcome}")
+                    await _send_reply(from_number, f"{ctia_welcome}\n\n{welcome}")
+                    return Response(status_code=200)
         except Exception:
             logger.exception(f"Link token activation failed for token {link_token}")
-        return _twiml_reply("That code wasn't recognized. Try again or visit the app.")
+        await _send_reply(from_number, "That code wasn't recognized. Try again or visit the app.")
+        return Response(status_code=200)
 
     # STOP / HELP / START keyword intercept — TCPA/CTIA compliance
     # Must run before user lookup, onboarding, and all other processing.
@@ -305,17 +401,21 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
                 logger.info(f"User {from_number} opted out via STOP")
         except Exception:
             logger.exception(f"Failed to pause user on STOP from {from_number}")
-        return _twiml_reply(
+        await _send_reply(
+            from_number,
             "You've been unsubscribed from stackd. No further messages will be sent. "
-            "Reply START to resubscribe."
+            "Reply START to resubscribe.",
         )
+        return Response(status_code=200)
 
     if _normalized in _HELP_WORDS:
         # CTIA requires: program name, support contact, STOP instruction, info link
-        return _twiml_reply(
+        await _send_reply(
+            from_number,
             "stackd AI coaching app. ~20-30 msgs/month. Msg&Data rates may apply. "
-            "Reply STOP to cancel anytime. Support: help@stackd.app stackd.app/help"
+            "Reply STOP to cancel anytime. Support: help@stackd.app stackd.app/help",
         )
+        return Response(status_code=200)
 
     if _normalized in _START_WORDS:
         try:
@@ -329,18 +429,21 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
                     "~20-30 msgs/month. Reply STOP anytime to cancel."
                 )
                 _save_message(_uid, "outbound", _start_welcome)
-                return _twiml_reply(_start_welcome)
+                await _send_reply(from_number, _start_welcome)
+                return Response(status_code=200)
         except Exception:
             logger.exception(f"Failed to unpause user {from_number} on START")
-        return _twiml_reply(
+        await _send_reply(
+            from_number,
             "Welcome back to stackd! You're resubscribed for daily coaching texts. "
-            "Reply STOP anytime to cancel."
+            "Reply STOP anytime to cancel.",
         )
+        return Response(status_code=200)
 
     # Rate limit — STOP/HELP/START bypass above, everything else checked here
     if _is_rate_limited(from_number):
         logger.warning(f"Rate limit hit for {from_number} — dropping message")
-        return Response(content="", media_type="application/xml")
+        return Response(status_code=200)
 
     # Look up user by phone number with schedule and coach settings
     user_res = (
@@ -359,14 +462,16 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
         )
         if onboarding_reply is not None:
             await _typing_delay(onboarding_reply)
-            return _twiml_reply(onboarding_reply)
+            await _send_reply(from_number, onboarding_reply)
+            return Response(status_code=200)
         # If None returned, onboarding is complete — fall through to normal pipeline
         # Re-fetch user_data in case it was just created
         if user_data is None:
             user_res2 = supabase.table("users").select("*, schedule(*), coach_settings(*)").eq("phone", from_number).execute()
             user_data = user_res2.data[0] if user_res2.data else None
         if user_data is None:
-            return _twiml_reply("Something went wrong. Try again.")
+            await _send_reply(from_number, "Something went wrong. Try again.")
+            return Response(status_code=200)
 
     user_id = user_data["id"]
     user_timezone = (user_data.get("schedule") or {}).get("timezone", "America/New_York")
@@ -400,7 +505,8 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
                     f"from {from_number}: {response_text[:80]}"
                 )
                 await _typing_delay(response_text)
-                return _twiml_reply(response_text)
+                await _send_reply(from_number, response_text)
+                return Response(status_code=200)
     except Exception:
         logger.exception(f"Notification reply intercept failed for user {user_id} — falling through to Gemini")
 
@@ -417,7 +523,8 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
     _save_message(user_id, "outbound", response_text)
     logger.info(f"Outbound SMS to {from_number}: {response_text[:80]}")
     await _typing_delay(response_text)
-    return _twiml_reply(response_text)
+    await _send_reply(from_number, response_text)
+    return Response(status_code=200)
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +551,7 @@ def _normalize_phone(phone: str) -> str:
 async def send_otp(req: SendOtpRequest):
     """
     Generate a 6-digit OTP, store it with a 5-minute TTL, and send it to
-    the given phone number via Twilio. Called from quiz step 6 before sign-in.
+    the given phone number via Sent.dm. Called from quiz step 6 before sign-in.
     The user doesn't have an account yet — no user_id is needed.
     """
     phone = _normalize_phone(req.phone)
@@ -460,10 +567,20 @@ async def send_otp(req: SendOtpRequest):
     }
 
     body = f"Your stackd verification code is: {code}\n\nExpires in 5 minutes. Don't share this."
+    template_id = os.getenv("SENT_SMS_TEMPLATE_ID", "")
+    client = _get_sent_client()
 
     try:
-        msg = twilio_client.messages.create(body=body, from_=os.getenv("TWILIO_PHONE_NUMBER"), to=phone)
-        logger.info(f"Sent OTP to {phone}, SID: {msg.sid}")
+        resp = await client.messages.send(
+            to=[phone],
+            template={
+                "id": template_id,
+                "name": "otp",
+                "parameters": {"text": body},
+            },
+            channel=["sms"],
+        )
+        logger.info(f"Sent OTP to {phone} via Sent.dm: {resp}")
     except Exception as e:
         logger.exception(f"Failed to send OTP to {phone}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to send verification code: {str(e)}")

@@ -1,8 +1,8 @@
 """
-Mock messaging — testing without Twilio.
+Mock messaging — testing without Sent.dm.
 
 All functions write to the messages table and print to console.
-Nothing here calls Twilio. Safe to run while API verification is pending.
+Nothing here calls Sent.dm. Safe to run while API verification is pending.
 
 Endpoints (mount at /mock):
     POST /mock/test-message/{user_id}   — sends a fixed test string
@@ -33,14 +33,14 @@ DAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
 
 
 # ---------------------------------------------------------------------------
-# Core mock send — reuse everywhere instead of calling Twilio
+# Core mock send — reuse everywhere instead of calling Sent.dm
 # ---------------------------------------------------------------------------
 
 def send_message(user_id: str, message: str) -> None:
     """
     Persist an outbound message to the DB and print it to the console.
-    Drop-in replacement for scheduler.send_sms() that skips Twilio entirely.
-    When Twilio is live, callers can swap this for the real send_sms + log_message pair.
+    Drop-in replacement for scheduler.send_sms() that skips Sent.dm entirely.
+    When Sent.dm is live, callers can swap this for the real send_sms + log_message pair.
     """
     try:
         supabase.table("messages").insert({
@@ -111,7 +111,7 @@ def run_daily_simulation(user_id: str) -> list[str]:
     """
     Match today's goals and mock-send an AI-generated check-in for each one.
     Reuses generate_checkin_text from ai.py — same logic the real scheduler uses,
-    just without Twilio at the end.
+    just without Sent.dm at the end.
     """
     from routes.ai import generate_checkin_text
     from routes.scheduler import run_async
@@ -172,7 +172,7 @@ async def welcome(user_id: str):
 @router.post("/daily-sim/{user_id}")
 async def daily_sim(user_id: str):
     """
-    Run today's check-in simulation for a specific user without Twilio.
+    Run today's check-in simulation for a specific user without Sent.dm.
     Matches goals against today's day of week and generates an AI message per goal.
     """
     sent = run_daily_simulation(user_id)
@@ -296,7 +296,7 @@ class ChatRequest(BaseModel):
 @router.post("/chat/{user_id}")
 async def mock_chat(user_id: str, req: ChatRequest):
     """
-    Simulate a full SMS conversation turn without Twilio.
+    Simulate a full SMS conversation turn without Sent.dm.
     Delegates to the shared process_inbound_sms pipeline so local testing
     is 100% representative of the live SMS webhook experience.
     """

@@ -6,7 +6,7 @@ import random
 from datetime import datetime, timedelta, date
 from fastapi import APIRouter
 from supabase import create_client
-from twilio.rest import Client as TwilioClient
+from sent_dm import Sent
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
@@ -72,12 +72,8 @@ supabase = create_client(
     os.getenv("SUPABASE_SERVICE_ROLE_KEY"),
 )
 
-twilio_client = TwilioClient(
-    os.getenv("TWILIO_ACCOUNT_SID"),
-    os.getenv("TWILIO_AUTH_TOKEN"),
-)
-
-TWILIO_FROM = os.getenv("TWILIO_PHONE_NUMBER")
+_sent_client = Sent(api_key=os.getenv("SENT_API_KEY"))
+_SENT_TEMPLATE_ID = os.getenv("SENT_SMS_TEMPLATE_ID", "")
 
 # BackgroundScheduler runs in a separate thread — no async event loop required.
 scheduler = BackgroundScheduler()
@@ -88,15 +84,23 @@ scheduler = BackgroundScheduler()
 # ---------------------------------------------------------------------------
 
 def send_sms(to: str, body: str) -> None:
-    """Send an SMS via Twilio with a human-like typing delay scaled to message length."""
+    """Send an SMS via Sent.dm with a human-like typing delay scaled to message length."""
     import time
     base = 2.0
     length_bonus = min(len(body) / 200, 2.0)
     jitter = random.uniform(0.0, 0.6)
     time.sleep(base + length_bonus + jitter)
     try:
-        msg = twilio_client.messages.create(body=body, from_=TWILIO_FROM, to=to)
-        logger.info(f"Sent SMS to {to}: sid={msg.sid}")
+        resp = _sent_client.messages.send(
+            to=[to],
+            template={
+                "id": _SENT_TEMPLATE_ID,
+                "name": "sms_reply",
+                "parameters": {"text": body},
+            },
+            channel=["sms"],
+        )
+        logger.info(f"Sent SMS to {to} via Sent.dm: {resp}")
     except Exception:
         logger.exception(f"Failed to send SMS to {to}")
 
@@ -132,7 +136,7 @@ def send_scheduled_checkins() -> None:
     matches their configured check-in time. For each match:
       - Fetches the user's active goals for today's day of week
       - Calls generate_checkin_text() for each goal
-      - Sends via Twilio
+      - Sends via Sent.dm
       - Logs to messages table
 
     Uses the user's own timezone to compare times accurately.
@@ -218,7 +222,7 @@ def send_motivation_messages() -> None:
       - Checks if enough time has passed since their last motivation text
         based on motivation_frequency (e.g. "Once a day" = 22h gap minimum)
       - Calls generate_motivation_text() if all checks pass
-      - Sends via Twilio and logs to messages table
+      - Sends via Sent.dm and logs to messages table
     """
     from routes.ai import generate_motivation_text
 
@@ -324,7 +328,7 @@ def send_scheduled_reminders() -> None:
     
     For each unsent reminder:
     - Fetch user's phone number
-    - Send reminder_message via Twilio
+    - Send reminder_message via Sent.dm
     - Update sent = true
     - Log to scheduler.log
     
@@ -392,7 +396,7 @@ def send_deadline_checkins() -> None:
     - Calculate days remaining until deadline_date
     - Fetch user's coach system prompt
     - Generate a deadline-specific check-in message using Gemini
-    - Send via Twilio
+    - Send via Sent.dm
     - Log to scheduler.log
     
     Error handling: One deadline failing doesn't block others.
@@ -774,7 +778,7 @@ def send_milestone_celebrations() -> None:
     For each milestone hit:
     - Check if milestone celebration already sent today
     - Generate special milestone celebration message using Gemini
-    - Send via Twilio
+    - Send via Sent.dm
     - Log to streaks.log
     
     Error handling: One milestone failing doesn't block others.
