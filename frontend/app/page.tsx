@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import LandingNavbar from '@/components/LandingNavbar';
 
-const SMS_URL = `sms:${process.env.NEXT_PUBLIC_BLOOIO_NUMBER || '+15550000000'}&body=Hello`;
+const SMS_URL = `sms:${process.env.NEXT_PUBLIC_BLOOIO_NUMBER || '+15550000000'}?body=Hello`;
 
 const SMS_ICON = (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">

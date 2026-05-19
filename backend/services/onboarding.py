@@ -185,18 +185,28 @@ async def handle_onboarding(
                 "phone_confirm": True,
             })
             auth_uid = auth_res.user.id
-            # Insert public users row with matching id
+            now_iso = datetime.now(timezone.utc).isoformat()
+            # Insert public users row with matching id — record TCPA consent at first contact
             supabase.table("users").insert({
                 "id": auth_uid,
                 "email": placeholder_email,
                 "phone": from_number,
                 "onboarding_step": 0,
+                "sms_consent_given_at": now_iso,
+                "sms_consent_method": "sms_keyword",
             }).execute()
             logger.info(f"[onboarding] new user created for {from_number} uid={auth_uid}")
         except Exception:
             logger.exception(f"[onboarding] failed to create user for {from_number}")
             return "Something went wrong. Try again in a moment."
-        return "Who do you want as your coach? Text any celebrity name."
+        # CTIA-required disclosure must be first message sent
+        ctia = (
+            "stackd: You're signing up for daily AI coaching texts. ~20-30 msgs/month. "
+            "Msg&Data rates may apply. Reply STOP to cancel anytime, HELP for info. "
+            "stackd.app/help\n\n"
+            "Who do you want as your coach? Text any celebrity name."
+        )
+        return ctia
 
     user_id = user_data["id"]
 
