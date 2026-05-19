@@ -227,25 +227,172 @@ async def handle_notification_reply(
 
 
 # ---------------------------------------------------------------------------
+# Background inbound processor
+# ---------------------------------------------------------------------------
+
+async def _process_inbound(from_number: str, message_body: str, background_tasks: BackgroundTasks) -> None:
+    """All inbound SMS logic runs here in the background so the webhook returns 200 instantly."""
+    try:
+        link_token = _extract_link_token(message_body)
+        if link_token:
+            try:
+                row = (
+                    supabase.table("phone_link_tokens")
+                    .select("user_id, used, expires_at")
+                    .eq("token", link_token)
+                    .eq("used", False)
+                    .execute()
+                )
+                if row.data:
+                    entry = row.data[0]
+                    if entry["expires_at"] > datetime.now(timezone.utc).isoformat():
+                        uid = entry["user_id"]
+                        supabase.table("users").update({"phone": from_number}).eq("id", uid).execute()
+                        supabase.table("phone_link_tokens").update({"used": True}).eq("token", link_token).execute()
+                        supabase.table("users").update({
+                            "sms_consent_given_at": datetime.now(timezone.utc).isoformat(),
+                            "sms_consent_method": "stk_token",
+                        }).eq("id", uid).execute()
+                        ctia_welcome = (
+                            "stackd: You're now set up for daily AI coaching texts. ~20-30 msgs/month. "
+                            "Msg&Data rates may apply. Reply STOP to cancel anytime, HELP for info. "
+                            "stackd.app/help"
+                        )
+                        _save_message(uid, "outbound", ctia_welcome)
+                        from routes.mock import send_welcome_message
+                        welcome = await send_welcome_message(uid)
+                        full_msg = f"{ctia_welcome}\n\n{welcome}"
+                        await _typing_delay(full_msg)
+                        send_reply(from_number, full_msg)
+                        return
+            except Exception:
+                logger.exception(f"Link token activation failed for token {link_token}")
+            send_reply(from_number, "That code wasn't recognized. Try again or visit the app.")
+            return
+
+        _normalized = message_body.strip().lower()
+        _STOP_WORDS  = {"stop", "stopall", "unsubscribe", "cancel", "end", "quit"}
+        _HELP_WORDS  = {"help", "info"}
+        _START_WORDS = {"start", "unstop", "yes"}
+
+        if _normalized in _STOP_WORDS:
+            try:
+                _stop_res = supabase.table("users").select("id").eq("phone", from_number).execute()
+                if _stop_res.data:
+                    supabase.table("users").update({"paused": True}).eq("phone", from_number).execute()
+                    logger.info(f"User {from_number} opted out via STOP")
+            except Exception:
+                logger.exception(f"Failed to pause user on STOP from {from_number}")
+            send_reply(from_number, "You've been unsubscribed from stackd. No further messages will be sent. Reply START to resubscribe.")
+            return
+
+        if _normalized in _HELP_WORDS:
+            send_reply(from_number, "stackd AI coaching app. ~20-30 msgs/month. Msg&Data rates may apply. Reply STOP to cancel anytime. Support: help@stackd.app stackd.app/help")
+            return
+
+        if _normalized in _START_WORDS:
+            try:
+                _start_res = supabase.table("users").select("id").eq("phone", from_number).execute()
+                if _start_res.data:
+                    _uid = _start_res.data[0]["id"]
+                    supabase.table("users").update({"paused": False}).eq("id", _uid).execute()
+                    logger.info(f"User {from_number} resubscribed via START")
+                    _start_welcome = (
+                        "Welcome back to stackd! You're resubscribed for daily coaching texts. "
+                        "~20-30 msgs/month. Reply STOP anytime to cancel."
+                    )
+                    _save_message(_uid, "outbound", _start_welcome)
+                    send_reply(from_number, _start_welcome)
+                    return
+            except Exception:
+                logger.exception(f"Failed to unpause user {from_number} on START")
+            send_reply(from_number, "Welcome back to stackd! You're resubscribed for daily coaching texts. Reply STOP anytime to cancel.")
+            return
+
+        if _is_rate_limited(from_number):
+            logger.warning(f"Rate limit hit for {from_number} — dropping message")
+            return
+
+        user_res = (
+            supabase.table("users")
+            .select("*, schedule(*), coach_settings(*)")
+            .eq("phone", from_number)
+            .execute()
+        )
+        user_data = user_res.data[0] if user_res.data else None
+
+        if user_data is None or user_data.get("onboarding_step", 5) < 5:
+            onboarding_reply = await handle_onboarding(
+                from_number, message_body, background_tasks, supabase, user_data
+            )
+            if onboarding_reply is not None:
+                await _typing_delay(onboarding_reply)
+                send_reply(from_number, onboarding_reply)
+                return
+            if user_data is None:
+                user_res2 = supabase.table("users").select("*, schedule(*), coach_settings(*)").eq("phone", from_number).execute()
+                user_data = user_res2.data[0] if user_res2.data else None
+            if user_data is None:
+                send_reply(from_number, "Something went wrong. Try again.")
+                return
+
+        user_id = user_data["id"]
+        user_timezone = (user_data.get("schedule") or {}).get("timezone", "America/New_York")
+
+        _save_message(user_id, "inbound", message_body)
+
+        try:
+            pending_res = (
+                supabase.table("activity_notifications")
+                .select("id, activity, scheduled_time")
+                .eq("user_id", user_id)
+                .eq("state", "NOTIFIED")
+                .order("notified_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if pending_res.data:
+                notif_state = parse_notification_reply(message_body)
+                if notif_state:
+                    notif_row = pending_res.data[0]
+                    response_text = await handle_notification_reply(
+                        user_id, user_data, notif_row, notif_state, message_body
+                    )
+                    _save_message(user_id, "outbound", response_text)
+                    logger.info(f"Notification reply {notif_state} for {notif_row['activity']} from {from_number}: {response_text[:80]}")
+                    await _typing_delay(response_text)
+                    send_reply(from_number, response_text)
+                    return
+        except Exception:
+            logger.exception(f"Notification reply intercept failed for user {user_id} — falling through to Gemini")
+
+        try:
+            response_text = await process_inbound_sms(user_id, message_body, user_timezone=user_timezone)
+        except Exception:
+            logger.exception(f"process_inbound_sms failed for user {user_id}")
+            response_text = (
+                f"Hey {user_data.get('name', 'there')}! Got your message — "
+                "I'm having a quick moment but I'll be right back with you. 💪"
+            )
+
+        _save_message(user_id, "outbound", response_text)
+        logger.info(f"Outbound SMS to {from_number}: {response_text[:80]}")
+        await _typing_delay(response_text)
+        send_reply(from_number, response_text)
+
+    except Exception:
+        logger.exception(f"_process_inbound failed for {from_number}")
+
+
+# ---------------------------------------------------------------------------
 # Webhook endpoint
 # ---------------------------------------------------------------------------
 
 @router.post("/incoming")
 async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
     """
-    Blooio webhook — thin wrapper around process_inbound_sms().
-
-    Responsibilities here:
-      1. Blooio signature validation
-      2. Parse sender and text from Blooio message.received payload
-      3. Link token intercept (STK-XXXX activation)
-      4. User lookup by phone number
-      5. Unknown number handling
-      6. Save inbound message
-      7. Notification reply intercept (CONFIRMED/DECLINED/RESCHEDULED)
-      8. Delegate to process_inbound_sms() for all routing/classification/voice
-      9. Save outbound message
-     10. Return plain 200 JSON
+    Blooio webhook — validates signature, parses payload, returns 200 immediately.
+    All processing delegated to _process_inbound() via BackgroundTasks.
     """
     raw_body = await request.body()
     signature_header = request.headers.get("X-Blooio-Signature", "")
@@ -261,7 +408,7 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # Only process inbound messages
+    # Only process inbound messages — return 200 immediately for all other events
     event = request.headers.get("X-Blooio-Event", payload.get("event", ""))
     if event != "message.received":
         return Response(content='{"ok":true}', media_type="application/json")
@@ -271,176 +418,9 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
 
     logger.info(f"Inbound SMS from {from_number}: {message_body[:80]}")
 
-    # Link token intercept — handle STK-XXXX activation before normal user lookup
-    link_token = _extract_link_token(message_body)
-    if link_token:
-        try:
-            row = (
-                supabase.table("phone_link_tokens")
-                .select("user_id, used, expires_at")
-                .eq("token", link_token)
-                .eq("used", False)
-                .execute()
-            )
-            if row.data:
-                entry = row.data[0]
-                if entry["expires_at"] > datetime.now(timezone.utc).isoformat():
-                    uid = entry["user_id"]
-                    supabase.table("users").update({"phone": from_number}).eq("id", uid).execute()
-                    supabase.table("phone_link_tokens").update({"used": True}).eq("token", link_token).execute()
-                    # Record TCPA consent immediately after phone linking
-                    supabase.table("users").update({
-                        "sms_consent_given_at": datetime.now(timezone.utc).isoformat(),
-                        "sms_consent_method": "stk_token",
-                    }).eq("id", uid).execute()
-                    # CTIA-required welcome message must be sent before any coach message
-                    ctia_welcome = (
-                        "stackd: You're now set up for daily AI coaching texts. ~20-30 msgs/month. "
-                        "Msg&Data rates may apply. Reply STOP to cancel anytime, HELP for info. "
-                        "stackd.app/help"
-                    )
-                    _save_message(uid, "outbound", ctia_welcome)
-                    from routes.mock import send_welcome_message
-                    welcome = await send_welcome_message(uid)
-                    full_msg = f"{ctia_welcome}\n\n{welcome}"
-                    await _typing_delay(full_msg)
-                    return _send_reply(from_number, full_msg)
-        except Exception:
-            logger.exception(f"Link token activation failed for token {link_token}")
-        return _send_reply(from_number, "That code wasn't recognized. Try again or visit the app.")
-
-    # STOP / HELP / START keyword intercept — TCPA/CTIA compliance
-    # Must run before user lookup, onboarding, and all other processing.
-    _normalized = message_body.strip().lower()
-    _STOP_WORDS  = {"stop", "stopall", "unsubscribe", "cancel", "end", "quit"}
-    _HELP_WORDS  = {"help", "info"}
-    _START_WORDS = {"start", "unstop", "yes"}
-
-    if _normalized in _STOP_WORDS:
-        # TCPA requires immediate unsubscribe — no link, no friction
-        try:
-            _stop_res = supabase.table("users").select("id").eq("phone", from_number).execute()
-            if _stop_res.data:
-                supabase.table("users").update({"paused": True}).eq("phone", from_number).execute()
-                logger.info(f"User {from_number} opted out via STOP")
-        except Exception:
-            logger.exception(f"Failed to pause user on STOP from {from_number}")
-        return _send_reply(
-            from_number,
-            "You've been unsubscribed from stackd. No further messages will be sent. "
-            "Reply START to resubscribe.",
-        )
-
-    if _normalized in _HELP_WORDS:
-        # CTIA requires: program name, support contact, STOP instruction, info link
-        return _send_reply(
-            from_number,
-            "stackd AI coaching app. ~20-30 msgs/month. Msg&Data rates may apply. "
-            "Reply STOP to cancel anytime. Support: help@stackd.app stackd.app/help",
-        )
-
-    if _normalized in _START_WORDS:
-        try:
-            _start_res = supabase.table("users").select("id").eq("phone", from_number).execute()
-            if _start_res.data:
-                _uid = _start_res.data[0]["id"]
-                supabase.table("users").update({"paused": False}).eq("id", _uid).execute()
-                logger.info(f"User {from_number} resubscribed via START")
-                _start_welcome = (
-                    "Welcome back to stackd! You're resubscribed for daily coaching texts. "
-                    "~20-30 msgs/month. Reply STOP anytime to cancel."
-                )
-                _save_message(_uid, "outbound", _start_welcome)
-                return _send_reply(from_number, _start_welcome)
-        except Exception:
-            logger.exception(f"Failed to unpause user {from_number} on START")
-        return _send_reply(
-            from_number,
-            "Welcome back to stackd! You're resubscribed for daily coaching texts. "
-            "Reply STOP anytime to cancel.",
-        )
-
-    # Rate limit — STOP/HELP/START bypass above, everything else checked here
-    if _is_rate_limited(from_number):
-        logger.warning(f"Rate limit hit for {from_number} — dropping message")
-        return Response(content='{"ok":true}', media_type="application/json")
-
-    # Look up user by phone number with schedule and coach settings
-    user_res = (
-        supabase.table("users")
-        .select("*, schedule(*), coach_settings(*)")
-        .eq("phone", from_number)
-        .execute()
-    )
-
-    user_data = user_res.data[0] if user_res.data else None
-
-    # Onboarding intercept — handles new users and users mid-onboarding (step < 5)
-    if user_data is None or user_data.get("onboarding_step", 5) < 5:
-        onboarding_reply = await handle_onboarding(
-            from_number, message_body, background_tasks, supabase, user_data
-        )
-        if onboarding_reply is not None:
-            await _typing_delay(onboarding_reply)
-            return _send_reply(from_number, onboarding_reply)
-        # If None returned, onboarding is complete — fall through to normal pipeline
-        # Re-fetch user_data in case it was just created
-        if user_data is None:
-            user_res2 = supabase.table("users").select("*, schedule(*), coach_settings(*)").eq("phone", from_number).execute()
-            user_data = user_res2.data[0] if user_res2.data else None
-        if user_data is None:
-            return _send_reply(from_number, "Something went wrong. Try again.")
-
-    user_id = user_data["id"]
-    user_timezone = (user_data.get("schedule") or {}).get("timezone", "America/New_York")
-
-    # Save inbound message
-    _save_message(user_id, "inbound", message_body)
-
-    # ── Notification reply intercept ────────────────────────────────────────
-    # Check if there's an open NOTIFIED activity_notifications row for this user.
-    # If the reply parses to a known state, handle it and short-circuit Gemini.
-    try:
-        pending_res = (
-            supabase.table("activity_notifications")
-            .select("id, activity, scheduled_time")
-            .eq("user_id", user_id)
-            .eq("state", "NOTIFIED")
-            .order("notified_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if pending_res.data:
-            notif_state = parse_notification_reply(message_body)
-            if notif_state:
-                notif_row = pending_res.data[0]
-                response_text = await handle_notification_reply(
-                    user_id, user_data, notif_row, notif_state, message_body
-                )
-                _save_message(user_id, "outbound", response_text)
-                logger.info(
-                    f"Notification reply {notif_state} for {notif_row['activity']} "
-                    f"from {from_number}: {response_text[:80]}"
-                )
-                await _typing_delay(response_text)
-                return _send_reply(from_number, response_text)
-    except Exception:
-        logger.exception(f"Notification reply intercept failed for user {user_id} — falling through to Gemini")
-
-    # Delegate to the shared pipeline — classification, routing, handlers, voice all live there
-    try:
-        response_text = await process_inbound_sms(user_id, message_body, user_timezone=user_timezone)
-    except Exception:
-        logger.exception(f"process_inbound_sms failed for user {user_id}")
-        response_text = (
-            f"Hey {user_data.get('name', 'there')}! Got your message — "
-            "I'm having a quick moment but I'll be right back with you. 💪"
-        )
-
-    _save_message(user_id, "outbound", response_text)
-    logger.info(f"Outbound SMS to {from_number}: {response_text[:80]}")
-    await _typing_delay(response_text)
-    return _send_reply(from_number, response_text)
+    # Return 200 immediately so Blooio doesn't retry, process in background
+    background_tasks.add_task(_process_inbound, from_number, message_body, background_tasks)
+    return Response(content='{"ok":true}', media_type="application/json")
 
 
 # ---------------------------------------------------------------------------
