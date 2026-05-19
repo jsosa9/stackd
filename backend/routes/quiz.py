@@ -304,7 +304,7 @@ async def complete_quiz(payload: QuizPayload, background_tasks: BackgroundTasks)
             'message': 'Quiz data saved successfully',
             'user_id': payload.user_id,
             'personality_id': personality_id,
-            'twilio_number': os.getenv('TWILIO_PHONE_NUMBER', ''),
+            'sms_number': os.getenv('BLOOIO_PHONE_NUMBER', ''),
         }
 
     except HTTPException:
@@ -341,5 +341,5 @@ async def generate_link_token(req: LinkTokenRequest):
 
     return {
         "token": token,
-        "twilio_number": os.getenv("TWILIO_PHONE_NUMBER", ""),
+        "sms_number": os.getenv("BLOOIO_PHONE_NUMBER", ""),
     }

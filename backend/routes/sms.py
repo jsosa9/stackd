@@ -1,20 +1,22 @@
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
 import os
 import random
 import re
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, BackgroundTasks, Request, Response, HTTPException
 from pydantic import BaseModel
-from twilio.twiml.messaging_response import MessagingResponse
-from twilio.request_validator import RequestValidator
-from twilio.rest import Client as TwilioClient
 from supabase import create_client
 from dotenv import load_dotenv
 
 from routes.ai import generate_notification_response
 from services.message_router import process_inbound_sms
+from services.messaging import send_reply
 from services.onboarding import handle_onboarding
 
 load_dotenv()
@@ -42,13 +44,6 @@ supabase = create_client(
     os.getenv("SUPABASE_URL"),
     os.getenv("SUPABASE_SERVICE_ROLE_KEY"),
 )
-
-twilio_client = TwilioClient(
-    os.getenv("TWILIO_ACCOUNT_SID"),
-    os.getenv("TWILIO_AUTH_TOKEN"),
-)
-
-validator = RequestValidator(os.getenv("TWILIO_AUTH_TOKEN"))
 
 
 # ---------------------------------------------------------------------------
@@ -82,11 +77,26 @@ def _is_rate_limited(phone: str) -> bool:
     return entry["count"] > _RATE_PER_MINUTE
 
 
-def _twiml_reply(message: str) -> Response:
-    """Return a TwiML XML response that sends an SMS back to the user."""
-    twiml = MessagingResponse()
-    twiml.message(message)
-    return Response(content=str(twiml), media_type="application/xml")
+def _verify_blooio_signature(raw_body: bytes, signature_header: str) -> bool:
+    """Verify Blooio webhook signature: t={timestamp},v1={hmac-sha256}."""
+    try:
+        parts = dict(p.split("=", 1) for p in signature_header.split(","))
+        timestamp = parts["t"]
+        v1 = parts["v1"]
+    except (KeyError, ValueError):
+        return False
+    if abs(time.time() - int(timestamp)) > 300:
+        return False
+    signed = f"{timestamp}.{raw_body.decode('utf-8')}"
+    secret = os.getenv("BLOOIO_WEBHOOK_SECRET", "").encode()
+    expected = hmac.new(secret, signed.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, v1)
+
+
+def _send_reply(to_number: str, message: str) -> Response:
+    """Send message via Blooio and return a plain 200 JSON response."""
+    send_reply(to_number, message)
+    return Response(content='{"ok":true}', media_type="application/json")
 
 
 def _save_message(user_id: str, direction: str, body: str) -> None:
@@ -223,11 +233,11 @@ async def handle_notification_reply(
 @router.post("/incoming")
 async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
     """
-    Twilio webhook — thin wrapper around process_inbound_sms().
+    Blooio webhook — thin wrapper around process_inbound_sms().
 
     Responsibilities here:
-      1. Twilio signature validation
-      2. Parse From number and Body
+      1. Blooio signature validation
+      2. Parse sender and text from Blooio message.received payload
       3. Link token intercept (STK-XXXX activation)
       4. User lookup by phone number
       5. Unknown number handling
@@ -235,20 +245,29 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
       7. Notification reply intercept (CONFIRMED/DECLINED/RESCHEDULED)
       8. Delegate to process_inbound_sms() for all routing/classification/voice
       9. Save outbound message
-     10. Return TwiML reply
+     10. Return plain 200 JSON
     """
-    form_data = await request.form()
-    url = str(request.url)
-    signature = request.headers.get("X-Twilio-Signature", "")
+    raw_body = await request.body()
+    signature_header = request.headers.get("X-Blooio-Signature", "")
 
-    # Validate Twilio signature in production
+    # Validate Blooio signature in production
     if os.getenv("ENV", "development") != "development":
-        if not validator.validate(url, dict(form_data), signature):
-            logger.warning("Invalid Twilio signature — rejecting request")
-            raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+        if not _verify_blooio_signature(raw_body, signature_header):
+            logger.warning("Invalid Blooio signature — rejecting request")
+            raise HTTPException(status_code=403, detail="Invalid Blooio signature")
 
-    from_number = form_data.get("From", "").strip()
-    message_body = form_data.get("Body", "").strip()
+    try:
+        payload = json.loads(raw_body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    # Only process inbound messages
+    event = request.headers.get("X-Blooio-Event", payload.get("event", ""))
+    if event != "message.received":
+        return Response(content='{"ok":true}', media_type="application/json")
+
+    from_number = (payload.get("sender") or payload.get("external_id") or "").strip()
+    message_body = (payload.get("text") or "").strip()
 
     logger.info(f"Inbound SMS from {from_number}: {message_body[:80]}")
 
@@ -283,11 +302,12 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
                     _save_message(uid, "outbound", ctia_welcome)
                     from routes.mock import send_welcome_message
                     welcome = await send_welcome_message(uid)
-                    await _typing_delay(f"{ctia_welcome}\n\n{welcome}")
-                    return _twiml_reply(f"{ctia_welcome}\n\n{welcome}")
+                    full_msg = f"{ctia_welcome}\n\n{welcome}"
+                    await _typing_delay(full_msg)
+                    return _send_reply(from_number, full_msg)
         except Exception:
             logger.exception(f"Link token activation failed for token {link_token}")
-        return _twiml_reply("That code wasn't recognized. Try again or visit the app.")
+        return _send_reply(from_number, "That code wasn't recognized. Try again or visit the app.")
 
     # STOP / HELP / START keyword intercept — TCPA/CTIA compliance
     # Must run before user lookup, onboarding, and all other processing.
@@ -305,16 +325,18 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
                 logger.info(f"User {from_number} opted out via STOP")
         except Exception:
             logger.exception(f"Failed to pause user on STOP from {from_number}")
-        return _twiml_reply(
+        return _send_reply(
+            from_number,
             "You've been unsubscribed from stackd. No further messages will be sent. "
-            "Reply START to resubscribe."
+            "Reply START to resubscribe.",
         )
 
     if _normalized in _HELP_WORDS:
         # CTIA requires: program name, support contact, STOP instruction, info link
-        return _twiml_reply(
+        return _send_reply(
+            from_number,
             "stackd AI coaching app. ~20-30 msgs/month. Msg&Data rates may apply. "
-            "Reply STOP to cancel anytime. Support: help@stackd.app stackd.app/help"
+            "Reply STOP to cancel anytime. Support: help@stackd.app stackd.app/help",
         )
 
     if _normalized in _START_WORDS:
@@ -329,18 +351,19 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
                     "~20-30 msgs/month. Reply STOP anytime to cancel."
                 )
                 _save_message(_uid, "outbound", _start_welcome)
-                return _twiml_reply(_start_welcome)
+                return _send_reply(from_number, _start_welcome)
         except Exception:
             logger.exception(f"Failed to unpause user {from_number} on START")
-        return _twiml_reply(
+        return _send_reply(
+            from_number,
             "Welcome back to stackd! You're resubscribed for daily coaching texts. "
-            "Reply STOP anytime to cancel."
+            "Reply STOP anytime to cancel.",
         )
 
     # Rate limit — STOP/HELP/START bypass above, everything else checked here
     if _is_rate_limited(from_number):
         logger.warning(f"Rate limit hit for {from_number} — dropping message")
-        return Response(content="", media_type="application/xml")
+        return Response(content='{"ok":true}', media_type="application/json")
 
     # Look up user by phone number with schedule and coach settings
     user_res = (
@@ -359,14 +382,14 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
         )
         if onboarding_reply is not None:
             await _typing_delay(onboarding_reply)
-            return _twiml_reply(onboarding_reply)
+            return _send_reply(from_number, onboarding_reply)
         # If None returned, onboarding is complete — fall through to normal pipeline
         # Re-fetch user_data in case it was just created
         if user_data is None:
             user_res2 = supabase.table("users").select("*, schedule(*), coach_settings(*)").eq("phone", from_number).execute()
             user_data = user_res2.data[0] if user_res2.data else None
         if user_data is None:
-            return _twiml_reply("Something went wrong. Try again.")
+            return _send_reply(from_number, "Something went wrong. Try again.")
 
     user_id = user_data["id"]
     user_timezone = (user_data.get("schedule") or {}).get("timezone", "America/New_York")
@@ -400,7 +423,7 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
                     f"from {from_number}: {response_text[:80]}"
                 )
                 await _typing_delay(response_text)
-                return _twiml_reply(response_text)
+                return _send_reply(from_number, response_text)
     except Exception:
         logger.exception(f"Notification reply intercept failed for user {user_id} — falling through to Gemini")
 
@@ -417,7 +440,7 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
     _save_message(user_id, "outbound", response_text)
     logger.info(f"Outbound SMS to {from_number}: {response_text[:80]}")
     await _typing_delay(response_text)
-    return _twiml_reply(response_text)
+    return _send_reply(from_number, response_text)
 
 
 # ---------------------------------------------------------------------------
@@ -443,9 +466,8 @@ def _normalize_phone(phone: str) -> str:
 @router.post("/send-otp")
 async def send_otp(req: SendOtpRequest):
     """
-    Generate a 6-digit OTP, store it with a 5-minute TTL, and send it to
-    the given phone number via Twilio. Called from quiz step 6 before sign-in.
-    The user doesn't have an account yet — no user_id is needed.
+    Generate a 6-digit OTP, store it with a 5-minute TTL, and send it via Blooio.
+    Called from quiz step 6 before sign-in. No user_id needed yet.
     """
     phone = _normalize_phone(req.phone)
 
@@ -462,8 +484,8 @@ async def send_otp(req: SendOtpRequest):
     body = f"Your stackd verification code is: {code}\n\nExpires in 5 minutes. Don't share this."
 
     try:
-        msg = twilio_client.messages.create(body=body, from_=os.getenv("TWILIO_PHONE_NUMBER"), to=phone)
-        logger.info(f"Sent OTP to {phone}, SID: {msg.sid}")
+        send_reply(phone, body)
+        logger.info(f"Sent OTP to {phone}")
     except Exception as e:
         logger.exception(f"Failed to send OTP to {phone}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to send verification code: {str(e)}")

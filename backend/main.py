@@ -27,9 +27,9 @@ _REQUIRED_ENV = [
     "SUPABASE_URL",
     "SUPABASE_SERVICE_ROLE_KEY",
     "GEMINI_API_KEY",
-    "TWILIO_ACCOUNT_SID",
-    "TWILIO_AUTH_TOKEN",
-    "TWILIO_PHONE_NUMBER",
+    "BLOOIO_API_KEY",
+    "BLOOIO_PHONE_NUMBER",
+    "BLOOIO_WEBHOOK_SECRET",
 ]
 
 _missing = [var for var in _REQUIRED_ENV if not os.getenv(var)]
