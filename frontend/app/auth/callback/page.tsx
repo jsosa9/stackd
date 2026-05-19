@@ -78,7 +78,7 @@ export default function AuthCallback() {
 
         clearQuiz();
         setToken(quizRes.personality_id ?? '');
-        setSmsNumber(quizRes.sms_number ?? process.env.NEXT_PUBLIC_BLOOIO_NUMBER ?? '');
+        setSmsNumber(quizRes.sms_number ?? process.env.NEXT_PUBLIC_SENDBLUE_NUMBER ?? '');
         setCoachLabel(
           coachSetupMode === 'celebrity' && celebrityName
             ? `Inspired by ${celebrityName}`

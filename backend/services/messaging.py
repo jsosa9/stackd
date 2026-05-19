@@ -1,35 +1,37 @@
-"""Shared outbound SMS helper — import this instead of calling Blooio directly."""
+"""Shared outbound SMS/iMessage helper — import this instead of calling Sendblue directly."""
 
 import logging
 import os
 import random
 import time
-from urllib.parse import quote
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-BLOOIO_BASE = "https://backend.blooio.com/v2/api"
+SENDBLUE_BASE = "https://api.sendblue.co/api"
 
 
 def send_reply(to_number: str, message: str) -> None:
-    """Send a message via Blooio REST API. Single source of truth for all outbound SMS."""
-    chat_id = quote(to_number, safe="")
+    """Send a message via Sendblue REST API. Single source of truth for all outbound messages."""
     try:
         response = requests.post(
-            f"{BLOOIO_BASE}/chats/{chat_id}/messages",
+            f"{SENDBLUE_BASE}/send-message",
             headers={
-                "Authorization": f"Bearer {os.getenv('BLOOIO_API_KEY')}",
+                "sb-api-key-id": os.getenv("SENDBLUE_API_KEY", ""),
+                "sb-api-secret-key": os.getenv("SENDBLUE_API_SECRET", ""),
                 "Content-Type": "application/json",
             },
-            json={"text": message},
+            json={
+                "number": to_number,
+                "content": message,
+            },
             timeout=10,
         )
         if not response.ok:
-            logger.error(f"Blooio send failed: {response.status_code} {response.text}")
+            logger.error(f"Sendblue send failed: {response.status_code} {response.text}")
     except Exception:
-        logger.exception(f"Blooio send raised exception for {to_number}")
+        logger.exception(f"Sendblue send raised exception for {to_number}")
 
 
 def send_reply_with_delay(to_number: str, message: str) -> None:

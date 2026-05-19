@@ -77,20 +77,14 @@ def _is_rate_limited(phone: str) -> bool:
     return entry["count"] > _RATE_PER_MINUTE
 
 
-def _verify_blooio_signature(raw_body: bytes, signature_header: str) -> bool:
-    """Verify Blooio webhook signature: t={timestamp},v1={hmac-sha256}."""
+def _verify_sendblue_signature(raw_body: bytes, signature_header: str) -> bool:
+    """Verify Sendblue webhook signature using HMAC-SHA256."""
     try:
-        parts = dict(p.split("=", 1) for p in signature_header.split(","))
-        timestamp = parts["t"]
-        v1 = parts["v1"]
-    except (KeyError, ValueError):
+        secret = os.getenv("SENDBLUE_WEBHOOK_SECRET", "").encode()
+        expected = hmac.new(secret, raw_body, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, signature_header)
+    except Exception:
         return False
-    if abs(time.time() - int(timestamp)) > 300:
-        return False
-    signed = f"{timestamp}.{raw_body.decode('utf-8')}"
-    secret = os.getenv("BLOOIO_WEBHOOK_SECRET", "").encode()
-    expected = hmac.new(secret, signed.encode(), hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, v1)
 
 
 def _send_reply(to_number: str, message: str) -> Response:
@@ -395,28 +389,29 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
     All processing delegated to _process_inbound() via BackgroundTasks.
     """
     raw_body = await request.body()
-    signature_header = request.headers.get("X-Blooio-Signature", "")
+    signature_header = request.headers.get("X-Sendblue-Signature", "")
 
-    # Validate Blooio signature in production
-    if os.getenv("ENV", "development") != "development":
-        if not _verify_blooio_signature(raw_body, signature_header):
-            logger.warning("Invalid Blooio signature — rejecting request")
-            raise HTTPException(status_code=403, detail="Invalid Blooio signature")
+    # Validate Sendblue signature in production
+    if os.getenv("ENV", "development") != "development" and os.getenv("SENDBLUE_WEBHOOK_SECRET"):
+        if not _verify_sendblue_signature(raw_body, signature_header):
+            logger.warning("Invalid Sendblue signature — rejecting request")
+            raise HTTPException(status_code=403, detail="Invalid Sendblue signature")
 
     try:
         payload = json.loads(raw_body)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # Only process inbound messages — return 200 immediately for all other events
-    event = request.headers.get("X-Blooio-Event", payload.get("event", ""))
-    if event != "message.received":
+    # Sendblue sends all webhook types to the same URL — only process inbound
+    # status field is "RECEIVED" for inbound messages
+    status = payload.get("status", "")
+    if status != "RECEIVED":
         return Response(content='{"ok":true}', media_type="application/json")
 
-    from_number = (payload.get("sender") or payload.get("external_id") or "").strip()
-    message_body = (payload.get("text") or "").strip()
+    from_number = (payload.get("from_number") or "").strip()
+    message_body = (payload.get("content") or "").strip()
 
-    logger.info(f"Inbound SMS from {from_number}: {message_body[:80]}")
+    logger.info(f"Inbound message from {from_number}: {message_body[:80]}")
 
     # Return 200 immediately so Blooio doesn't retry, process in background
     background_tasks.add_task(_process_inbound, from_number, message_body, background_tasks)

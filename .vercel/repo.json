@@ -1,0 +1,11 @@
+{
+  "remoteName": "origin",
+  "projects": [
+    {
+      "id": "prj_q96qyNaW49RCpUrHmzsKycj83X2p",
+      "name": "stackd",
+      "directory": ".",
+      "orgId": "team_HaxMMus6bSlP7m6to7WSYwqA"
+    }
+  ]
+}

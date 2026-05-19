@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
-const SMS_NUMBER = process.env.NEXT_PUBLIC_BLOOIO_NUMBER ?? '';
+const SMS_NUMBER = process.env.NEXT_PUBLIC_SENDBLUE_NUMBER ?? '';
 
 type State = 'loading' | 'success' | 'error';
 
