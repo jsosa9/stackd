@@ -15,7 +15,7 @@ export default function AuthCallback() {
   const [screen, setScreen] = useState<Screen>('loading');
   const [status, setStatus] = useState('Setting up your coach…');
   const [token, setToken] = useState('');
-  const [twilioNumber, setTwilioNumber] = useState('');
+  const [smsNumber, setSmsNumber] = useState('');
   const [coachLabel, setCoachLabel] = useState('');
   const clearQuiz = useQuizStore((s) => s.clear);
 
@@ -78,7 +78,7 @@ export default function AuthCallback() {
 
         clearQuiz();
         setToken(quizRes.personality_id ?? '');
-        setTwilioNumber(quizRes.twilio_number ?? process.env.NEXT_PUBLIC_TWILIO_NUMBER ?? '');
+        setSmsNumber(quizRes.sms_number ?? process.env.NEXT_PUBLIC_BLOOIO_NUMBER ?? '');
         setCoachLabel(
           coachSetupMode === 'celebrity' && celebrityName
             ? `Inspired by ${celebrityName}`
@@ -93,7 +93,7 @@ export default function AuthCallback() {
     run();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const smsHref = `sms:${twilioNumber}${twilioNumber ? `?body=${encodeURIComponent(token)}` : ''}`;
+  const smsHref = `sms:${smsNumber}${smsNumber ? `?body=${encodeURIComponent(token)}` : ''}`;
 
   return (
     <>

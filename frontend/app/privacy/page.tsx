@@ -232,7 +232,7 @@ export default function PrivacyPage() {
                 <li>We do not sell your personal information</li>
                 <li>We do not share your data with third parties for marketing purposes</li>
                 <li>We use Supabase for secure data storage</li>
-                <li>We use Twilio to deliver SMS messages</li>
+                <li>We use Blooio to deliver SMS messages</li>
                 <li>We use Google Gemini AI to generate responses</li>
                 <li>These service providers are bound by their own privacy policies</li>
               </ul>

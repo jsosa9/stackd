@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
-const TWILIO_NUMBER = process.env.NEXT_PUBLIC_TWILIO_NUMBER ?? '';
+const SMS_NUMBER = process.env.NEXT_PUBLIC_BLOOIO_NUMBER ?? '';
 
 type State = 'loading' | 'success' | 'error';
 
@@ -40,8 +40,8 @@ function UnsubscribeContent() {
             <h1 className="unsub-h1">You&apos;re unsubscribed.</h1>
             <p className="unsub-sub">No more messages will be sent to your number.</p>
             <p className="unsub-small">
-              Changed your mind?{TWILIO_NUMBER ? (
-                <> Text <strong>START</strong> to <a href={`sms:${TWILIO_NUMBER}`}>{TWILIO_NUMBER}</a></>
+              Changed your mind?{SMS_NUMBER ? (
+                <> Text <strong>START</strong> to <a href={`sms:${SMS_NUMBER}`}>{SMS_NUMBER}</a></>
               ) : (
                 <> Text <strong>START</strong> to your stackd number</>
               )}
