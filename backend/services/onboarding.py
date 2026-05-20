@@ -25,6 +25,7 @@ from services.messaging import send_reply
 
 from routes.personas import persona_manager
 from services.message_router import _generate_voice_reply
+from routes.ai import HUMAN_BEHAVIOR_RULES
 
 load_dotenv()
 
@@ -32,38 +33,91 @@ logger = logging.getLogger("onboarding")
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
+_ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_DAY_MAP = {
-    "mon": "Monday", "monday": "Monday",
-    "tue": "Tuesday", "tues": "Tuesday", "tuesday": "Tuesday",
-    "wed": "Wednesday", "wednesday": "Wednesday",
-    "thu": "Thursday", "thur": "Thursday", "thurs": "Thursday", "thursday": "Thursday",
-    "fri": "Friday", "friday": "Friday",
-    "sat": "Saturday", "saturday": "Saturday",
-    "sun": "Sunday", "sunday": "Sunday",
-}
+async def _extract_days_gemini(text: str, goal_name: str) -> list[str]:
+    """Call 1: extract days from natural language reply."""
+    prompt = (
+        f"The user was asked which days they want to do '{goal_name}'. "
+        f"Their reply: \"{text}\"\n"
+        f"Extract the days of the week they want. If they mean every day or daily, return all 7. "
+        f"Return a JSON array of full day names from: {_ALL_DAYS}. No markdown. No explanation."
+    )
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash-lite")
+        raw = model.generate_content(prompt).text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        days = json.loads(raw)
+        return [d for d in days if d in _ALL_DAYS]
+    except Exception:
+        logger.exception("[onboarding] day extraction failed")
+        return []
 
-_ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-_ALL_DAY_PHRASES = {"every day", "everyday", "all", "all week", "all 7 days", "7 days", "daily", "all days"}
+
+async def _score_day_extraction(original_text: str, goal_name: str, extracted_days: list[str]) -> int:
+    """Call 2: independently score extraction accuracy 0-100."""
+    prompt = (
+        f"A user was asked which days they want to do '{goal_name}'. "
+        f"They said: \"{original_text}\"\n"
+        f"An AI extracted these days: {extracted_days}\n"
+        f"Score how accurately this extraction matches the user's intent from 0 to 100. "
+        f"100 = perfectly correct. 0 = wrong or invented days. "
+        f"Return a single integer only. No explanation."
+    )
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash-lite")
+        raw = model.generate_content(prompt).text.strip()
+        match = re.search(r'\d+', raw)
+        return int(match.group()) if match else 0
+    except Exception:
+        logger.exception("[onboarding] day scoring failed")
+        return 0
 
 
-def _parse_days(text: str) -> list[str]:
-    normalized = re.sub(r"\s+", " ", text.lower().strip())
-    if normalized in _ALL_DAY_PHRASES:
-        return _ALL_DAYS[:]
-    tokens = re.split(r"[\s,/]+", normalized)
-    days = []
-    for token in tokens:
-        token = token.strip(".")
-        if token in _DAY_MAP:
-            day = _DAY_MAP[token]
-            if day not in days:
-                days.append(day)
-    return days
+async def _parse_days_smart(text: str, goal_name: str) -> list[str]:
+    """Extract days then independently score — only return if confidence >= 70."""
+    days = await _extract_days_gemini(text, goal_name)
+    if not days:
+        return []
+    score = await _score_day_extraction(text, goal_name, days)
+    logger.info(f"[onboarding] day extraction score={score} days={days}")
+    return days if score >= 70 else []
+
+
+async def _goals_mentioned_gemini(text: str, goal_names: list[str]) -> list[str]:
+    """Return which goal names from the list the user mentioned scheduling in their message."""
+    if not goal_names:
+        return []
+    prompt = (
+        f"Message: \"{text}\"\n"
+        f"Which of these goals did the user mention they want to schedule? {goal_names}\n"
+        f"Return a JSON array of matching goal names exactly as listed. Return [] if none. No markdown."
+    )
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash-lite")
+        raw = model.generate_content(prompt).text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        mentioned = json.loads(raw)
+        return [g for g in mentioned if g in goal_names]
+    except Exception:
+        logger.exception("[onboarding] goals mentioned extraction failed")
+        return []
+
+
+async def _coach_voice(system_prompt: str, instruction: str) -> str:
+    """Generate a short in-character coach message for the given instruction."""
+    try:
+        model = genai.GenerativeModel(
+            "gemini-2.5-flash-lite",
+            system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}\n\nKeep it to one SMS message. No hyphens.",
+        )
+        return model.generate_content(instruction).text.strip()
+    except Exception:
+        logger.exception("[onboarding] coach voice generation failed")
+        return instruction
 
 
 def _send_sms(to: str, body: str) -> None:
@@ -278,7 +332,6 @@ async def handle_onboarding(
             .execute()
         )
         if not ctx_res.data:
-            # Context lost — skip ahead
             supabase.table("users").update({"onboarding_step": 4}).eq("id", user_id).execute()
             return "You're all set. Your coach will be in touch."
 
@@ -287,16 +340,36 @@ async def handle_onboarding(
         idx = ctx["current_index"]
         current_goal = goals[idx]
 
-        days = _parse_days(message_body)
-        if days:
-            supabase.table("goals").update({"days": days}).eq("id", current_goal["id"]).execute()
-            logger.info(f"[onboarding] user={user_id} goal '{current_goal['name']}' days={days}")
-        else:
-            return f"I didn't catch the days. For '{current_goal['name']}' — which days? (e.g. Mon, Wed, Fri)"
+        # Fetch coach system prompt once for in-character responses
+        coach_res = supabase.table("coach_settings").select("coach_name, generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
+        coach_row = coach_res.data[0] if coach_res.data else {}
+        coach_name = coach_row.get("coach_name", "Your coach")
+        coach_prompt = coach_row.get("generated_system_prompt", "")
+
+        days = await _parse_days_smart(message_body, current_goal["name"])
+        if not days:
+            clarify = await _coach_voice(
+                coach_prompt,
+                f"Ask the user which specific days of the week they want to do '{current_goal['name']}'. Be direct and brief."
+            )
+            return clarify
+
+        supabase.table("goals").update({"days": days}).eq("id", current_goal["id"]).execute()
+        logger.info(f"[onboarding] user={user_id} goal '{current_goal['name']}' days={days}")
+
+        # Check if user mentioned any remaining goals in the same message — apply same days
+        remaining_goals = goals[idx + 1:]
+        if remaining_goals:
+            remaining_names = [g["name"] for g in remaining_goals]
+            also_mentioned = await _goals_mentioned_gemini(message_body, remaining_names)
+            for g in remaining_goals:
+                if g["name"] in also_mentioned:
+                    supabase.table("goals").update({"days": days}).eq("id", g["id"]).execute()
+                    logger.info(f"[onboarding] user={user_id} auto-scheduled '{g['name']}' days={days}")
+                    idx += 1  # advance past this goal
 
         next_idx = idx + 1
         if next_idx < len(goals):
-            # More goals to schedule
             ctx["current_index"] = next_idx
             supabase.table("user_context").update({
                 "description": json.dumps(ctx),
@@ -304,17 +377,21 @@ async def handle_onboarding(
             }).eq("user_id", user_id).eq("type", "onboarding_goals").execute()
 
             next_goal = goals[next_idx]["name"]
-            return f"Got it. For '{next_goal}' — which days?"
+            prompt_msg = await _coach_voice(
+                coach_prompt,
+                f"Ask the user which days of the week they want to do '{next_goal}'. One sentence, direct."
+            )
+            return prompt_msg
         else:
-            # All goals scheduled
             supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "onboarding_goals").execute()
             supabase.table("users").update({"onboarding_step": 5}).eq("id", user_id).execute()
             logger.info(f"[onboarding] user={user_id} all goals scheduled, step→5")
 
-            # Fetch coach name for confirmation
-            coach_res = supabase.table("coach_settings").select("coach_name").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
-            coach_name = coach_res.data[0]["coach_name"] if coach_res.data else "Your coach"
-            return f"Locked in. {coach_name} will text you on schedule. Let's get to work."
+            wrap_up = await _coach_voice(
+                coach_prompt,
+                f"All goals are scheduled. Tell the user you will be texting them on schedule and you are ready to get to work. One message, in character."
+            )
+            return wrap_up
 
     # ── Step 5+ — fall through to normal pipeline ─────────────────────────
     return None
