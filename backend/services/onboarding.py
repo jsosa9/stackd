@@ -406,90 +406,107 @@ async def handle_onboarding(
 
     # ── Step 3 — schedule loop (partial-reply safe, days + time per goal) ─
     if step == 3:
-        ctx_res = (
-            supabase.table("user_context")
-            .select("description")
-            .eq("user_id", user_id)
-            .eq("type", "onboarding_goals")
-            .limit(1)
-            .execute()
-        )
-        if not ctx_res.data:
-            supabase.table("users").update({"onboarding_step": 5}).eq("id", user_id).execute()
-            return "You're all set. Your coach will be in touch."
-
-        ctx = json.loads(ctx_res.data[0]["description"])
-        goals = ctx["goals"]
-        remaining_ids: list = ctx.get("remaining", [g["id"] for g in goals])
-
-        coach_res = supabase.table("coach_settings").select("coach_name, generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
-        coach_row = coach_res.data[0] if coach_res.data else {}
-        coach_prompt = coach_row.get("generated_system_prompt", "")
-
-        # Build lookup by id and by name for remaining goals
-        remaining_goals = [g for g in goals if g["id"] in remaining_ids]
-        remaining_names = [g["name"] for g in remaining_goals]
-
-        # Figure out which goals the user addressed in this message
-        if len(remaining_goals) == 1:
-            mentioned_names = [remaining_goals[0]["name"]]
-        else:
-            mentioned_names = await _goals_mentioned_gemini(message_body, remaining_names)
-            if not mentioned_names:
-                # Assume they're replying about the first remaining goal
-                mentioned_names = [remaining_goals[0]["name"]]
-
-        scheduled_any = False
-        for goal in remaining_goals:
-            if goal["name"] not in mentioned_names:
-                continue
-            days = await _parse_days_smart(message_body, goal["name"])
-            if not days:
-                continue
-            time_str = await _extract_time_gemini(message_body, goal["name"])
-            update_payload: dict = {"days": days}
-            if time_str:
-                update_payload["times_per_day"] = {"default": time_str}
-            supabase.table("goals").update(update_payload).eq("id", goal["id"]).execute()
-            logger.info(f"[onboarding] user={user_id} goal '{goal['name']}' days={days} time={time_str}")
-            remaining_ids.remove(goal["id"])
-            scheduled_any = True
-
-        if not scheduled_any:
-            # Couldn't parse anything — ask to clarify the first remaining goal
-            clarify = await _coach_voice(
-                coach_prompt,
-                f"Ask the user which days and what time they want to do '{remaining_goals[0]['name']}'. Direct, one sentence."
+        try:
+            ctx_res = (
+                supabase.table("user_context")
+                .select("description")
+                .eq("user_id", user_id)
+                .eq("type", "onboarding_goals")
+                .limit(1)
+                .execute()
             )
-            return clarify
+            if not ctx_res.data:
+                supabase.table("users").update({"onboarding_step": 5}).eq("id", user_id).execute()
+                return "You're all set. Your coach will be in touch."
 
-        if not remaining_ids:
-            try:
+            ctx = json.loads(ctx_res.data[0]["description"])
+            goals = ctx["goals"]
+            # Copy to avoid mutating the JSON-derived list in place across retries
+            remaining_ids: list = list(ctx.get("remaining", [g["id"] for g in goals]))
+
+            coach_res = supabase.table("coach_settings").select("coach_name, generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
+            coach_row = coach_res.data[0] if coach_res.data else {}
+            coach_prompt = coach_row.get("generated_system_prompt", "")
+
+            remaining_goals = [g for g in goals if g["id"] in remaining_ids]
+            remaining_names = [g["name"] for g in remaining_goals]
+
+            if not remaining_goals:
+                # remaining list drained but step never advanced — clean up
+                logger.warning(f"[onboarding] user={user_id} step=3 with empty remaining; finalizing")
                 supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "onboarding_goals").execute()
                 supabase.table("users").update({"onboarding_step": 5}).eq("id", user_id).execute()
-            except Exception:
-                logger.exception(f"[onboarding] failed to finalize step 5 for user={user_id}")
-            logger.info(f"[onboarding] user={user_id} all goals scheduled, step→5")
-            wrap_up = await _coach_voice(
+                return "You're all set. Your coach will be in touch."
+
+            if len(remaining_goals) == 1:
+                mentioned_names = [remaining_goals[0]["name"]]
+            else:
+                mentioned_names = await _goals_mentioned_gemini(message_body, remaining_names)
+                if not mentioned_names:
+                    mentioned_names = [remaining_goals[0]["name"]]
+
+            scheduled_any = False
+            for goal in remaining_goals:
+                if goal["name"] not in mentioned_names:
+                    continue
+                days = await _parse_days_smart(message_body, goal["name"])
+                if not days:
+                    continue
+                time_str = await _extract_time_gemini(message_body, goal["name"])
+                update_payload: dict = {"days": days}
+                if time_str:
+                    update_payload["times_per_day"] = {"default": time_str}
+                try:
+                    supabase.table("goals").update(update_payload).eq("id", goal["id"]).execute()
+                except Exception:
+                    logger.exception(f"[onboarding] failed to update goal '{goal['name']}' for user={user_id}")
+                    continue
+                logger.info(f"[onboarding] user={user_id} goal '{goal['name']}' days={days} time={time_str}")
+                if goal["id"] in remaining_ids:
+                    remaining_ids.remove(goal["id"])
+                scheduled_any = True
+
+            if not scheduled_any:
+                clarify = await _coach_voice(
+                    coach_prompt,
+                    f"Ask the user which days and what time they want to do '{remaining_goals[0]['name']}'. Direct, one sentence."
+                )
+                return clarify
+
+            if not remaining_ids:
+                logger.info(f"[onboarding] user={user_id} all goals scheduled, finalizing step→5")
+                try:
+                    supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "onboarding_goals").execute()
+                except Exception:
+                    logger.exception(f"[onboarding] failed to delete onboarding_goals context for user={user_id}")
+                try:
+                    supabase.table("users").update({"onboarding_step": 5}).eq("id", user_id).execute()
+                except Exception:
+                    logger.exception(f"[onboarding] failed to advance step to 5 for user={user_id}")
+                wrap_up = await _coach_voice(
+                    coach_prompt,
+                    "All goals are scheduled. Tell the user you will be texting them on schedule and you are ready to get to work. One message, in character."
+                )
+                return wrap_up
+
+            # Some goals still unscheduled — ask about all remaining at once
+            ctx["remaining"] = remaining_ids
+            supabase.table("user_context").update({
+                "description": json.dumps(ctx),
+                "expires_at": _expires_24h(),
+            }).eq("user_id", user_id).eq("type", "onboarding_goals").execute()
+
+            still_remaining = [g for g in goals if g["id"] in remaining_ids]
+            still_names = ", ".join(f"'{g['name']}'" for g in still_remaining)
+            next_prompt = await _coach_voice(
                 coach_prompt,
-                "All goals are scheduled. Tell the user you will be texting them on schedule and you are ready to get to work. One message, in character."
+                f"Ask the user which days and what time they plan to do each of these: {still_names}. Write it as a single flowing sentence with no lists, no colons, no line breaks."
             )
-            return wrap_up
+            return next_prompt
 
-        # Some goals still unscheduled — ask about all remaining at once
-        ctx["remaining"] = remaining_ids
-        supabase.table("user_context").update({
-            "description": json.dumps(ctx),
-            "expires_at": _expires_24h(),
-        }).eq("user_id", user_id).eq("type", "onboarding_goals").execute()
-
-        still_remaining = [g for g in goals if g["id"] in remaining_ids]
-        still_names = ", ".join(f"'{g['name']}'" for g in still_remaining)
-        next_prompt = await _coach_voice(
-            coach_prompt,
-            f"Ask the user which days and what time they plan to do each of these: {still_names}. Write it as a single flowing sentence with no lists, no colons, no line breaks."
-        )
-        return next_prompt
+        except Exception:
+            logger.exception(f"[onboarding] step 3 unhandled exception for user={user_id}")
+            return "Something went wrong scheduling your goals. Reply with the days and times and I'll try again."
 
     # ── Step 5+ — fall through to normal pipeline ─────────────────────────
     return None
