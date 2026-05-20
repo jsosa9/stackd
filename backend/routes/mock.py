@@ -1,10 +1,13 @@
 """
-Mock messaging — testing without Twilio.
+Mock messaging — testing without Sendblue.
 
 All functions write to the messages table and print to console.
-Nothing here calls Twilio. Safe to run while API verification is pending.
+Nothing here calls Sendblue. Safe to run locally for full pipeline testing.
 
 Endpoints (mount at /mock):
+    GET  /mock/chat-ui                  — browser chat UI for simulating SMS
+    POST /mock/simulate-sms             — full pipeline, captures replies instead of sending
+    DELETE /mock/reset-user             — wipe a test user from Supabase for fresh run
     POST /mock/test-message/{user_id}   — sends a fixed test string
     POST /mock/welcome/{user_id}        — welcome message using coach name + goals
     POST /mock/daily-sim/{user_id}      — simulates today's check-ins via AI
@@ -13,8 +16,10 @@ Endpoints (mount at /mock):
 import logging
 import os
 from datetime import datetime
+from contextlib import contextmanager
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from supabase import create_client
 from dotenv import load_dotenv
@@ -145,6 +150,262 @@ def run_daily_simulation(user_id: str) -> list[str]:
             logger.error(f"[MOCK] Failed check-in for goal '{goal}': {e}")
 
     return sent
+
+
+# ---------------------------------------------------------------------------
+# SMS Simulation — full pipeline, no Sendblue
+# ---------------------------------------------------------------------------
+
+class SimulateSmsRequest(BaseModel):
+    from_number: str = "+19176316464"
+    message: str
+
+
+@contextmanager
+def _capture_replies(captured: list[str]):
+    """Patch send_reply in all modules that imported it to capture calls."""
+    import services.messaging as _msg
+    import services.onboarding as _onb
+    import routes.sms as _sms
+
+    original_msg = _msg.send_reply
+    original_onb = _onb.send_reply
+    original_sms = _sms.send_reply
+
+    def _capture(to_number: str, message: str) -> None:
+        captured.append(message)
+
+    _msg.send_reply = _capture
+    _onb.send_reply = _capture
+    _sms.send_reply = _capture
+    try:
+        yield
+    finally:
+        _msg.send_reply = original_msg
+        _onb.send_reply = original_onb
+        _sms.send_reply = original_sms
+
+
+@router.post("/simulate-sms")
+async def simulate_sms(req: SimulateSmsRequest):
+    """
+    Run the full inbound SMS pipeline (including onboarding) and return
+    what would have been sent to the user — without calling Sendblue.
+    """
+    import asyncio
+    from routes.sms import _process_inbound
+
+    captured: list[str] = []
+    bt = BackgroundTasks()
+
+    with _capture_replies(captured):
+        await _process_inbound(req.from_number, req.message, bt)
+        # Drain background tasks inline while patch is still active.
+        # Clear the list first so FastAPI doesn't re-run them after the response.
+        tasks_to_run = list(bt.tasks)
+        bt.tasks.clear()
+        for task in tasks_to_run:
+            try:
+                if asyncio.iscoroutinefunction(task.func):
+                    await task.func(*task.args, **task.kwargs)
+                else:
+                    task.func(*task.args, **task.kwargs)
+            except Exception as e:
+                logger.exception(f"[MOCK] Background task failed: {e}")
+
+    return {
+        "from_number": req.from_number,
+        "message": req.message,
+        "replies": captured,
+    }
+
+
+@router.delete("/reset-user")
+async def reset_user(phone: str = Query(..., description="E.164 phone number e.g. +19176316464")):
+    """Delete a test user from Supabase (auth + public) so onboarding can restart fresh."""
+    placeholder_email = f"sms_{phone.lstrip('+').replace(' ', '')}@stackd.app"
+    deleted = []
+    errors = []
+
+    try:
+        supabase.table("users").delete().eq("phone", phone).execute()
+        deleted.append("public.users")
+    except Exception as e:
+        errors.append(f"public.users: {e}")
+
+    try:
+        # Find auth user by email and delete
+        users_res = supabase.auth.admin.list_users()
+        for u in (users_res or []):
+            if u.email == placeholder_email:
+                supabase.auth.admin.delete_user(u.id)
+                deleted.append(f"auth.users ({u.id})")
+                break
+    except Exception as e:
+        errors.append(f"auth.users: {e}")
+
+    return {"deleted": deleted, "errors": errors, "phone": phone}
+
+
+@router.get("/chat-ui", response_class=HTMLResponse)
+async def chat_ui():
+    """Self-contained SMS simulation UI — no Sendblue, full pipeline accuracy."""
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>stackd SMS Simulator</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1c1c1e; color: #fff; height: 100dvh; display: flex; flex-direction: column; }
+  header { background: #2c2c2e; padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #3a3a3c; flex-shrink: 0; }
+  header h1 { font-size: 16px; font-weight: 600; }
+  #phone-input { background: #3a3a3c; border: none; color: #fff; padding: 6px 10px; border-radius: 8px; font-size: 13px; width: 180px; }
+  #reset-btn { background: #ff453a; color: #fff; border: none; padding: 6px 12px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+  #reset-btn:hover { background: #ff6961; }
+  #messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .msg-group { display: flex; flex-direction: column; gap: 4px; }
+  .bubble { max-width: 72%; padding: 10px 14px; border-radius: 18px; font-size: 15px; line-height: 1.45; word-break: break-word; }
+  .user-wrap { align-self: flex-end; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+  .bot-wrap { align-self: flex-start; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+  .user .bubble { background: #0a84ff; color: #fff; border-bottom-right-radius: 4px; }
+  .bot .bubble { background: #2c2c2e; color: #fff; border-bottom-left-radius: 4px; }
+  .json-toggle { font-size: 11px; color: #8e8e93; cursor: pointer; padding: 2px 6px; border-radius: 4px; background: #2c2c2e; border: 1px solid #3a3a3c; }
+  .json-toggle:hover { background: #3a3a3c; }
+  .json-block { display: none; background: #0d0d0f; border: 1px solid #3a3a3c; border-radius: 10px; padding: 10px; font-family: monospace; font-size: 11px; color: #a8ff78; max-width: 90%; overflow-x: auto; white-space: pre; }
+  .json-block.visible { display: block; }
+  .typing { align-self: flex-start; background: #2c2c2e; border-radius: 18px; border-bottom-left-radius: 4px; padding: 10px 16px; }
+  .typing span { display: inline-block; width: 6px; height: 6px; background: #8e8e93; border-radius: 50%; animation: bounce 1.2s infinite; margin: 0 2px; }
+  .typing span:nth-child(2) { animation-delay: 0.2s; }
+  .typing span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes bounce { 0%,60%,100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }
+  footer { padding: 12px 16px; background: #2c2c2e; border-top: 1px solid #3a3a3c; display: flex; gap: 10px; flex-shrink: 0; }
+  #msg-input { flex: 1; background: #3a3a3c; border: none; color: #fff; padding: 10px 14px; border-radius: 20px; font-size: 15px; outline: none; }
+  #msg-input::placeholder { color: #636366; }
+  #send-btn { background: #0a84ff; border: none; color: #fff; width: 36px; height: 36px; border-radius: 50%; cursor: pointer; font-size: 18px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; align-self: center; }
+  #send-btn:disabled { background: #3a3a3c; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<header>
+  <h1>stackd SMS Simulator</h1>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <input id="phone-input" type="text" value="+19176316464" placeholder="+1..." />
+    <button id="reset-btn" onclick="resetUser()">Reset User</button>
+  </div>
+</header>
+<div id="messages"></div>
+<footer>
+  <input id="msg-input" type="text" placeholder="iMessage" autocomplete="off" />
+  <button id="send-btn" onclick="sendMessage()">&#8593;</button>
+</footer>
+<script>
+  const messagesEl = document.getElementById('messages');
+  const inputEl = document.getElementById('msg-input');
+  const sendBtn = document.getElementById('send-btn');
+
+  inputEl.addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(); });
+
+  function getPhone() { return document.getElementById('phone-input').value.trim(); }
+
+  function addUserBubble(text) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-group user-wrap user';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = text;
+    wrap.appendChild(bubble);
+    messagesEl.appendChild(wrap);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function addBotBubbles(replies, rawJson) {
+    replies.forEach((text, i) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'msg-group bot-wrap bot';
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.textContent = text;
+      wrap.appendChild(bubble);
+      if (i === replies.length - 1) {
+        const toggle = document.createElement('button');
+        toggle.className = 'json-toggle';
+        toggle.textContent = 'Show JSON';
+        const jsonBlock = document.createElement('pre');
+        jsonBlock.className = 'json-block';
+        jsonBlock.textContent = JSON.stringify(rawJson, null, 2);
+        toggle.onclick = () => {
+          jsonBlock.classList.toggle('visible');
+          toggle.textContent = jsonBlock.classList.contains('visible') ? 'Hide JSON' : 'Show JSON';
+        };
+        wrap.appendChild(toggle);
+        wrap.appendChild(jsonBlock);
+      }
+      messagesEl.appendChild(wrap);
+    });
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function addTyping() {
+    const el = document.createElement('div');
+    el.className = 'typing';
+    el.id = 'typing-indicator';
+    el.innerHTML = '<span></span><span></span><span></span>';
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return el;
+  }
+
+  async function sendMessage() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+    inputEl.value = '';
+    sendBtn.disabled = true;
+    addUserBubble(text);
+    const typing = addTyping();
+    try {
+      const res = await fetch('/mock/simulate-sms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from_number: getPhone(), message: text }),
+      });
+      const data = await res.json();
+      typing.remove();
+      if (data.replies && data.replies.length > 0) {
+        addBotBubbles(data.replies, data);
+      } else {
+        addBotBubbles(['(no reply captured)'], data);
+      }
+    } catch (err) {
+      typing.remove();
+      addBotBubbles([`Error: ${err.message}`], { error: err.message });
+    }
+    sendBtn.disabled = false;
+    inputEl.focus();
+  }
+
+  async function resetUser() {
+    const phone = getPhone();
+    if (!confirm(`Delete user ${phone} from Supabase?`)) return;
+    try {
+      const res = await fetch(`/mock/reset-user?phone=${encodeURIComponent(phone)}`, { method: 'DELETE' });
+      const data = await res.json();
+      messagesEl.innerHTML = '';
+      const note = document.createElement('div');
+      note.style.cssText = 'text-align:center;color:#636366;font-size:13px;padding:20px;';
+      note.textContent = `User reset. Deleted: ${data.deleted.join(', ') || 'nothing found'}`;
+      messagesEl.appendChild(note);
+    } catch (err) {
+      alert(`Reset failed: ${err.message}`);
+    }
+  }
+
+  inputEl.focus();
+</script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 
 # ---------------------------------------------------------------------------

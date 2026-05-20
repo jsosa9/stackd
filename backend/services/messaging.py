@@ -14,6 +14,11 @@ SENDBLUE_BASE = "https://api.sendblue.co/api"
 
 def send_reply(to_number: str, message: str) -> None:
     """Send a message via Sendblue REST API. Single source of truth for all outbound messages."""
+    # --- TESTING STUB: remove these 3 lines when going live ---
+    logger.info(f"[SMS STUB] to={to_number} | {message}")
+    print(f"\n[SMS STUB] → {to_number}\n{message}\n")
+    return
+    # ----------------------------------------------------------
     try:
         response = requests.post(
             f"{SENDBLUE_BASE}/send-message",
