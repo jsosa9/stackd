@@ -24,6 +24,7 @@ def send_reply(to_number: str, message: str) -> None:
             },
             json={
                 "number": to_number,
+                "from_number": os.getenv("SENDBLUE_PHONE_NUMBER", ""),
                 "content": message,
             },
             timeout=10,
