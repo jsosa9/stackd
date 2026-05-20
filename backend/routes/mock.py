@@ -188,6 +188,7 @@ async def simulate_sms(req: SimulateSmsRequest):
     Run the full inbound SMS pipeline (including onboarding) and return
     what would have been sent to the user — without calling Sendblue.
     """
+    import asyncio
     from routes.sms import _process_inbound
 
     captured: list[str] = []
@@ -195,10 +196,13 @@ async def simulate_sms(req: SimulateSmsRequest):
 
     with _capture_replies(captured):
         await _process_inbound(req.from_number, req.message, bt)
-        # Drain background tasks inline (e.g. setup_and_intro persona generation)
-        for task in bt.tasks:
+        # Drain background tasks inline while patch is still active.
+        # Clear the list first so FastAPI doesn't re-run them after the response.
+        tasks_to_run = list(bt.tasks)
+        bt.tasks.clear()
+        for task in tasks_to_run:
             try:
-                if task.is_async:
+                if asyncio.iscoroutinefunction(task.func):
                     await task.func(*task.args, **task.kwargs)
                 else:
                     task.func(*task.args, **task.kwargs)
