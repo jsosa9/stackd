@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, date
 from fastapi import APIRouter
 from supabase import create_client
 from services.messaging import send_reply_with_delay
+from services.billing import is_billable, generate_trial_warning_sms
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
@@ -140,6 +141,8 @@ def send_scheduled_checkins() -> None:
             continue
         if user.get("paused"):
             continue
+        if not run_async(is_billable(user.get("id", ""))):
+            continue
         if not user.get("sms_consent_given_at"):
             logger.info(f"Skipping check-in — user {user.get('id')} has no consent record")
             continue
@@ -203,10 +206,10 @@ def send_motivation_messages() -> None:
       - Checks if the current local time falls within their motivation_window
       - Checks if enough time has passed since their last motivation text
         based on motivation_frequency (e.g. "Once a day" = 22h gap minimum)
-      - Calls generate_motivation_text() if all checks pass
+      - Calls deliver_motivation_text() if all checks pass (Quotable API + goal context + dedup)
       - Sends via Blooio and logs to messages table
     """
-    from routes.ai import generate_motivation_text
+    from routes.ai import deliver_motivation_text
 
     logger.debug("Running motivation message job")
 
@@ -232,6 +235,8 @@ def send_motivation_messages() -> None:
         if not user or not user.get("phone"):
             continue
         if user.get("paused"):
+            continue
+        if not run_async(is_billable(user.get("id", ""))):
             continue
         if not user.get("sms_consent_given_at"):
             logger.info(f"Skipping motivation — user {user.get('id')} has no consent record")
@@ -291,7 +296,7 @@ def send_motivation_messages() -> None:
         logger.info(f"Sending motivation to {user.get('name', user_id)}")
 
         try:
-            text = run_async(generate_motivation_text(user_id))
+            text = run_async(deliver_motivation_text(user_id))
             send_sms(user["phone"], text)
             log_message(user_id, text)
         except Exception:
@@ -345,6 +350,9 @@ def send_scheduled_reminders() -> None:
                 continue
             if user.get("paused"):
                 scheduler_logger.info(f"Skipping reminder {reminder_id} — user is paused")
+                continue
+            if not run_async(is_billable(user.get("id", ""))):
+                scheduler_logger.info(f"Skipping reminder {reminder_id} — user not billable")
                 continue
             if not user.get("sms_consent_given_at"):
                 scheduler_logger.info(f"Skipping reminder {reminder_id} — user has no consent record")
@@ -411,6 +419,9 @@ def send_deadline_checkins() -> None:
                 continue
             if user.get("paused"):
                 scheduler_logger.info(f"Skipping deadline check-in — user {user_id} is paused")
+                continue
+            if not run_async(is_billable(user_id)):
+                scheduler_logger.info(f"Skipping deadline check-in — user {user_id} not billable")
                 continue
             if not user.get("sms_consent_given_at"):
                 scheduler_logger.info(f"Skipping deadline check-in — user {user_id} has no consent record")
@@ -498,7 +509,9 @@ def analyze_message_patterns() -> None:
 
         for user in (users_res.data or []):
             user_id = user["id"]
-            
+            if not run_async(is_billable(user_id)):
+                continue
+
             try:
                 # Fetch last 30 days of messages
                 thirty_days_ago = (datetime.now(pytz.UTC) - timedelta(days=30)).isoformat()
@@ -667,6 +680,9 @@ def send_proactive_pattern_messages() -> None:
             if user.get("paused"):
                 scheduler_logger.info(f"Skipping proactive message — user {user_id} is paused")
                 continue
+            if not run_async(is_billable(user_id)):
+                scheduler_logger.info(f"Skipping proactive message — user {user_id} not billable")
+                continue
             if not user.get("sms_consent_given_at"):
                 scheduler_logger.info(f"Skipping proactive message — user {user_id} has no consent record")
                 continue
@@ -798,6 +814,9 @@ def send_milestone_celebrations() -> None:
             if user.get("paused"):
                 streaks_logger.info(f"Skipping milestone — user {user_id} is paused")
                 continue
+            if not run_async(is_billable(user_id)):
+                streaks_logger.info(f"Skipping milestone — user {user_id} not billable")
+                continue
             if not user.get("sms_consent_given_at"):
                 streaks_logger.info(f"Skipping milestone — user {user_id} has no consent record")
                 continue
@@ -900,7 +919,9 @@ def send_weekly_reflections() -> None:
 
             if not phone:
                 continue
-            
+            if not run_async(is_billable(user_id)):
+                continue
+
             try:
                 # Get this week's messages (last 7 days)
                 week_ago = (datetime.now(pytz.UTC) - timedelta(days=7)).isoformat()
@@ -993,11 +1014,13 @@ def detect_silent_users() -> None:
 
             if user.get("paused"):
                 continue
+            if not run_async(is_billable(user_id)):
+                continue
             if not user.get("sms_consent_given_at"):
                 continue
             if not phone:
                 continue
-            
+
             try:
                 # Get last inbound message
                 last_msg = (
@@ -1101,6 +1124,8 @@ def send_activity_notifications() -> None:
                 continue
             if user.get("paused"):
                 continue
+            if not run_async(is_billable(user.get("id", ""))):
+                continue
             if not user.get("sms_consent_given_at"):
                 continue
 
@@ -1145,15 +1170,24 @@ def send_activity_notifications() -> None:
                         scheduler_logger.warning(f"Invalid time '{time_str}' for {activity}, user {user_id}")
                         continue
 
+                    # ── 30-min pre-notification ───────────────────────────
                     trigger_total = (sched_h * 60 + sched_m - 30 + 1440) % 1440
                     trigger_h = trigger_total // 60
                     trigger_m = trigger_total % 60
+                    is_30min = local_now.hour == trigger_h and local_now.minute == trigger_m
+                    # ── T=0 start message ─────────────────────────────────
+                    is_start = local_now.hour == sched_h and local_now.minute == sched_m
 
-                    if local_now.hour != trigger_h or local_now.minute != trigger_m:
+                    if not is_30min and not is_start:
                         continue
 
+                    period = "AM" if sched_h < 12 else "PM"
+                    hour_12 = sched_h % 12 or 12
+                    time_12h = f"{hour_12}:{str(sched_m).zfill(2)} {period}"
+                    name = user.get("name") or "there"
+                    now_utc = datetime.now(pytz.UTC).isoformat()
+
                     try:
-                        # Check state machine row
                         existing = (
                             supabase.table("activity_notifications")
                             .select("id, state")
@@ -1163,59 +1197,55 @@ def send_activity_notifications() -> None:
                             .eq("scheduled_time", time_str)
                             .execute()
                         )
+                        existing_state = existing.data[0]["state"] if existing.data else None
+                        notif_id = existing.data[0]["id"] if existing.data else None
 
-                        if existing.data and existing.data[0]["state"] != "SCHEDULED":
-                            scheduler_logger.debug(
-                                f"Notification already in state={existing.data[0]['state']} "
-                                f"for {activity}, user {user_id} — skipping"
-                            )
-                            continue
+                        if is_30min:
+                            # Skip if already past SCHEDULED state (dedup)
+                            if existing_state and existing_state != "SCHEDULED":
+                                scheduler_logger.debug(
+                                    f"30-min already fired state={existing_state} "
+                                    f"for {activity}, user {user_id} — skipping"
+                                )
+                            else:
+                                if not notif_id:
+                                    ins = supabase.table("activity_notifications").insert({
+                                        "user_id": user_id,
+                                        "activity": activity,
+                                        "scheduled_date": today_date,
+                                        "scheduled_time": time_str,
+                                        "state": "SCHEDULED",
+                                    }).execute()
+                                    notif_id = ins.data[0]["id"]
 
-                        now_utc = datetime.now(pytz.UTC).isoformat()
+                                try:
+                                    from routes.ai import generate_activity_notification_text
+                                    body = run_async(generate_activity_notification_text(user_id, activity, time_12h))
+                                except Exception as ai_err:
+                                    scheduler_logger.error(f"AI pre-notification failed for {user_id}/{activity}: {ai_err}")
+                                    body = f"Hey {name}! {activity} starts at {time_12h}. You in? (YES / NO / RESCHEDULE)"
 
-                        if existing.data:
-                            notif_id = existing.data[0]["id"]
-                        else:
-                            ins = supabase.table("activity_notifications").insert({
-                                "user_id": user_id,
-                                "activity": activity,
-                                "scheduled_date": today_date,
-                                "scheduled_time": time_str,
-                                "state": "SCHEDULED",
-                            }).execute()
-                            notif_id = ins.data[0]["id"]
+                                send_sms(user["phone"], body)
+                                log_message(user_id, body)
+                                supabase.table("activity_notifications").update({
+                                    "state": "NOTIFIED",
+                                    "notified_at": now_utc,
+                                    "updated_at": now_utc,
+                                }).eq("id", notif_id).execute()
+                                scheduler_logger.info(f"30-MIN NOTIFIED: {name} / {activity} at {time_12h}")
 
-                        # Format and send SMS
-                        period = "AM" if sched_h < 12 else "PM"
-                        hour_12 = sched_h % 12 or 12
-                        time_12h = f"{hour_12}:{str(sched_m).zfill(2)} {period}"
-                        name = user.get("name") or "there"
-                        try:
-                            from routes.ai import generate_activity_notification_text
-                            body = run_async(generate_activity_notification_text(user_id, activity, time_12h))
-                        except Exception as ai_err:
-                            scheduler_logger.error(
-                                f"AI activity notification failed for {user_id}/{activity}: {ai_err}"
-                            )
-                            body = (
-                                f"Hey {name}! {activity} starts at {time_12h}. "
-                                f"You in? (YES / NO / RESCHEDULE)"
-                            )
+                        if is_start:
+                            # Send start message if user confirmed OR if no reply yet (NOTIFIED)
+                            if existing_state in ("CONFIRMED", "NOTIFIED"):
+                                try:
+                                    from routes.ai import generate_activity_start_text
+                                    start_body = run_async(generate_activity_start_text(user_id, activity))
+                                except Exception:
+                                    start_body = f"It's time. {activity} starts now. Let's go."
 
-                        send_sms(user["phone"], body)
-                        log_message(user_id, body)
-
-                        # Advance state to NOTIFIED
-                        supabase.table("activity_notifications").update({
-                            "state": "NOTIFIED",
-                            "notified_at": now_utc,
-                            "updated_at": now_utc,
-                        }).eq("id", notif_id).execute()
-
-                        scheduler_logger.info(
-                            f"NOTIFIED: {name} / {activity} at {time_12h} "
-                            f"(trigger {trigger_h:02d}:{trigger_m:02d} {tz_name})"
-                        )
+                                send_sms(user["phone"], start_body)
+                                log_message(user_id, start_body)
+                                scheduler_logger.info(f"START NOTIFIED: {name} / {activity} at {time_12h}")
 
                     except Exception as e:
                         scheduler_logger.error(
@@ -1272,6 +1302,8 @@ def check_missed_notifications() -> None:
                 continue
             if user.get("paused"):
                 continue
+            if not run_async(is_billable(user_id)):
+                continue
             if not user.get("sms_consent_given_at"):
                 continue
 
@@ -1307,21 +1339,108 @@ def check_missed_notifications() -> None:
         scheduler_logger.error(f"Critical error in missed notification checker: {e}", exc_info=True)
 
 
+# ---------------------------------------------------------------------------
+# Scheduler job 12: Trial warning messages (runs every hour)
+# ---------------------------------------------------------------------------
+
+def send_trial_warnings() -> None:
+    """
+    Runs every hour. Sends in-character trial expiry warnings at:
+      - ~12 hours remaining (11-13h window)
+      - ~final warning (0-2h window)
+
+    Deduplicates via user_context rows with type='trial_warning'
+    created in the last 10 hours.
+    """
+    scheduler_logger.debug("Running trial warning job")
+
+    try:
+        now_utc = datetime.now(pytz.UTC)
+
+        res = (
+            supabase.table("users")
+            .select("id, phone, trial_ends_at")
+            .eq("subscription_status", "trial")
+            .eq("paused", False)
+            .not_.is_("trial_ends_at", "null")
+            .not_.is_("sms_consent_given_at", "null")
+            .execute()
+        )
+
+        for user in res.data or []:
+            user_id = user["id"]
+            phone = user.get("phone")
+            if not phone:
+                continue
+
+            try:
+                trial_ends = datetime.fromisoformat(
+                    user["trial_ends_at"].replace("Z", "+00:00")
+                )
+                hours_remaining = (trial_ends - now_utc).total_seconds() / 3600
+
+                is_12h_window = 11 <= hours_remaining <= 13
+                is_final_window = 0 <= hours_remaining <= 2
+
+                if not is_12h_window and not is_final_window:
+                    continue
+
+                # Dedup — skip if we already sent a trial warning in last 10 hours
+                ten_hours_ago = (now_utc - timedelta(hours=10)).isoformat()
+                existing = (
+                    supabase.table("user_context")
+                    .select("id")
+                    .eq("user_id", user_id)
+                    .eq("type", "trial_warning")
+                    .gte("created_at", ten_hours_ago)
+                    .limit(1)
+                    .execute()
+                )
+                if existing.data:
+                    continue
+
+                hours_int = max(0, int(hours_remaining))
+                msg = run_async(generate_trial_warning_sms(user_id, hours_int))
+                send_sms(phone, msg)
+                log_message(user_id, msg)
+
+                # Record that we sent a warning
+                supabase.table("user_context").insert({
+                    "user_id": user_id,
+                    "type": "trial_warning",
+                    "description": f"sent {hours_int}h trial warning",
+                    "expires_at": (now_utc + timedelta(hours=24)).isoformat(),
+                }).execute()
+
+                scheduler_logger.info(
+                    f"Sent trial warning to user={user_id} ({hours_int}h remaining)"
+                )
+
+            except Exception as e:
+                scheduler_logger.error(f"Trial warning failed for user={user_id}: {e}")
+                continue
+
+    except Exception as e:
+        scheduler_logger.error(f"Critical error in trial warning job: {e}", exc_info=True)
+
+
 def start_scheduler() -> None:
     """
     Register jobs and start the background scheduler. Called from main.py startup.
     
     Jobs registered:
-    1. send_scheduled_checkins — every minute
-    2. send_motivation_messages — every 30 minutes
-    3. send_scheduled_reminders — every minute
-    4. send_deadline_checkins — every morning 6am UTC
-    5. analyze_message_patterns — every night midnight UTC
-    6. send_proactive_pattern_messages — every morning 7am UTC
-    7. send_milestone_celebrations — every night 9pm UTC
-    8. send_weekly_reflections — every Sunday 7pm UTC
-    9. detect_silent_users — every 6 hours
+    1.  send_scheduled_checkins — every minute
+    2.  send_motivation_messages — every 30 minutes
+    3.  send_scheduled_reminders — every minute
+    4.  send_deadline_checkins — every morning 6am UTC
+    5.  analyze_message_patterns — every night midnight UTC
+    6.  send_proactive_pattern_messages — every morning 7am UTC
+    7.  send_milestone_celebrations — every night 9pm UTC
+    8.  send_weekly_reflections — every Sunday 7pm UTC
+    9.  detect_silent_users — every 6 hours
     10. send_activity_notifications — every minute (30-min pre-activity SMS)
+    11. check_missed_notifications — every minute
+    12. send_trial_warnings — every hour (12h and final warning before trial expires)
     """
     if scheduler.running:
         logger.info("Scheduler already running — skipping start")
@@ -1426,16 +1545,26 @@ def start_scheduler() -> None:
         misfire_grace_time=30,
     )
 
+    # Trial warnings: every hour
+    scheduler.add_job(
+        send_trial_warnings,
+        CronTrigger(minute="0"),
+        id="trial_warnings",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+
     scheduler.start()
     logger.info(
-        "APScheduler started with 11 jobs: "
+        "APScheduler started with 12 jobs: "
         "checkins (1m), motivation (30m), reminders (1m), "
         "deadlines (6am UTC), patterns (midnight UTC), "
         "proactive (7am UTC), milestones (9pm UTC), "
         "reflections (Sun 7pm UTC), silence (6h), "
-        "activity_notifications (1m), missed_notifications (1m)"
+        "activity_notifications (1m), missed_notifications (1m), "
+        "trial_warnings (1h)"
     )
-    scheduler_logger.info("Scheduler initialized with all 11 jobs")
+    scheduler_logger.info("Scheduler initialized with all 12 jobs")
 
 
 def stop_scheduler() -> None:
@@ -1452,19 +1581,22 @@ def stop_scheduler() -> None:
 @router.post("/trigger-checkins")
 async def trigger_checkins():
     """Manually fire the check-in job right now (for testing)."""
-    send_scheduled_checkins()
+    import asyncio
+    await asyncio.to_thread(send_scheduled_checkins)
     return {"status": "check-ins triggered"}
 
 
 @router.post("/trigger-motivation")
 async def trigger_motivation():
     """Manually fire the motivation job right now (for testing)."""
-    send_motivation_messages()
+    import asyncio
+    await asyncio.to_thread(send_motivation_messages)
     return {"status": "motivation messages triggered"}
 
 
 @router.post("/trigger-activity-notifications")
 async def trigger_activity_notifications():
     """Manually fire the activity notification job right now (for testing)."""
-    send_activity_notifications()
+    import asyncio
+    await asyncio.to_thread(send_activity_notifications)
     return {"status": "activity notifications triggered"}

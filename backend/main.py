@@ -16,6 +16,7 @@ from routes.mock import router as mock_router
 from routes.celebrity import router as celebrity_router
 from routes.celebrities import router as celebrities_router
 from routes.unsubscribe import router as unsubscribe_router
+from routes.stripe_webhook import router as stripe_router
 
 load_dotenv()
 
@@ -30,6 +31,9 @@ _REQUIRED_ENV = [
     "SENDBLUE_API_KEY",
     "SENDBLUE_API_SECRET",
     "SENDBLUE_PHONE_NUMBER",
+    "STRIPE_SECRET_KEY",
+    "STRIPE_WEBHOOK_SECRET",
+    "STRIPE_PRICE_ID",
 ]
 
 _missing = [var for var in _REQUIRED_ENV if not os.getenv(var)]
@@ -76,6 +80,7 @@ app.include_router(mock_router, prefix="/mock", tags=["Mock"])
 app.include_router(celebrity_router, prefix="/celebrity", tags=["Celebrity"])
 app.include_router(celebrities_router, prefix="/api/celebrities", tags=["Celebrities"])
 app.include_router(unsubscribe_router, prefix="/api", tags=["Unsubscribe"])
+app.include_router(stripe_router, prefix="/stripe", tags=["Billing"])
 
 
 @app.get("/health")

@@ -4,7 +4,6 @@ import hmac
 import json
 import logging
 import os
-import random
 import re
 import secrets
 import time
@@ -56,11 +55,7 @@ def _extract_link_token(body: str) -> str | None:
 
 
 async def _typing_delay(text: str) -> None:
-    """Simulate human typing time based on message length before sending."""
-    base = 2.0
-    length_bonus = min(len(text) / 200, 2.0)  # up to 2 extra seconds for longer messages
-    jitter = random.uniform(0.0, 0.6)
-    await asyncio.sleep(base + length_bonus + jitter)
+    pass
 
 
 def _is_rate_limited(phone: str) -> bool:
@@ -267,7 +262,11 @@ async def _process_inbound(from_number: str, message_body: str, background_tasks
         _normalized = message_body.strip().lower()
         _STOP_WORDS  = {"stop", "stopall", "unsubscribe", "cancel", "end", "quit"}
         _HELP_WORDS  = {"help", "info"}
-        _START_WORDS = {"start", "unstop", "yes"}
+        _START_WORDS = {"start", "unstop"}  # "yes" excluded — needed during onboarding step 4
+
+        # Check onboarding step before keyword matching so "yes/no" aren't swallowed during step 4
+        _onb_check = supabase.table("users").select("onboarding_step").eq("phone", from_number).limit(1).execute()
+        _onb_step = _onb_check.data[0].get("onboarding_step") if _onb_check.data else None
 
         if _normalized in _STOP_WORDS:
             try:
@@ -284,7 +283,7 @@ async def _process_inbound(from_number: str, message_body: str, background_tasks
             send_reply(from_number, "stackd AI coaching app. ~20-30 msgs/month. Msg&Data rates may apply. Reply STOP to cancel anytime. Support: help@stackd.app stackd.app/help")
             return
 
-        if _normalized in _START_WORDS:
+        if _normalized in _START_WORDS and _onb_step not in (3, 4):
             try:
                 _start_res = supabase.table("users").select("id").eq("phone", from_number).execute()
                 if _start_res.data:

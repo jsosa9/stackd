@@ -166,20 +166,24 @@ def _capture_replies(captured: list[str]):
     """Patch send_reply in all modules that imported it to capture calls."""
     import services.messaging as _msg
     import services.onboarding as _onb
+    import routes.sms as _sms
 
     original_msg = _msg.send_reply
     original_onb = _onb.send_reply
+    original_sms = _sms.send_reply
 
     def _capture(to_number: str, message: str) -> None:
         captured.append(message)
 
     _msg.send_reply = _capture
     _onb.send_reply = _capture
+    _sms.send_reply = _capture
     try:
         yield
     finally:
         _msg.send_reply = original_msg
         _onb.send_reply = original_onb
+        _sms.send_reply = original_sms
 
 
 @router.post("/simulate-sms")
