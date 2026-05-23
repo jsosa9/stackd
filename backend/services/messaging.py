@@ -2,8 +2,6 @@
 
 import logging
 import os
-import random
-import time
 
 import requests
 
@@ -14,11 +12,6 @@ SENDBLUE_BASE = "https://api.sendblue.co/api"
 
 def send_reply(to_number: str, message: str) -> None:
     """Send a message via Sendblue REST API. Single source of truth for all outbound messages."""
-    # --- STUB: remove before going live ---
-    logger.info(f"[SMS STUB] to={to_number} | {message}")
-    print(f"\n[SMS STUB] → {to_number}\n{message}\n")
-    return
-    # --------------------------------------
     try:
         response = requests.post(
             f"{SENDBLUE_BASE}/send-message",
@@ -41,9 +34,4 @@ def send_reply(to_number: str, message: str) -> None:
 
 
 def send_reply_with_delay(to_number: str, message: str) -> None:
-    """Blocking send with a human-like typing delay (used from sync scheduler threads)."""
-    base = 2.0
-    length_bonus = min(len(message) / 200, 2.0)
-    jitter = random.uniform(0.0, 0.6)
-    time.sleep(base + length_bonus + jitter)
     send_reply(to_number, message)

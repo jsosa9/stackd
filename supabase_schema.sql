@@ -454,3 +454,12 @@ ALTER TABLE public.coach_settings
   ADD COLUMN IF NOT EXISTS coach_message_length TEXT DEFAULT 'medium',
   ADD COLUMN IF NOT EXISTS coach_miss_behavior TEXT DEFAULT 'compassionate',
   ADD COLUMN IF NOT EXISTS custom_coach_nuclear_option TEXT;
+
+-- Stripe billing columns
+ALTER TABLE public.users
+  ADD COLUMN IF NOT EXISTS subscription_status TEXT DEFAULT 'trial',
+  ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT,
+  ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_users_subscription_status
+  ON public.users(subscription_status);

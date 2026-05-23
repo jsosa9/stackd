@@ -850,20 +850,51 @@ async def deliver_motivation_text(user_id: str) -> str:
     # Append rules for reinforcement
     system_prompt = f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}\n\n{CONVICTION_RULES}"
 
-    # Pull a random quote from Quotable API
+    # Fetch user's active goals for context
+    import random as _random
+    goals_res = supabase.table("goals").select("activity").eq("user_id", user_id).execute()
+    goal_names = [g["activity"] for g in goals_res.data] if goals_res.data else []
+
+    # Load already-sent quote IDs to avoid repeats
+    sent_res = supabase.table("sent_quotes").select("quote_id").eq("user_id", user_id).execute()
+    sent_ids = {row["quote_id"] for row in sent_res.data if row.get("quote_id")} if sent_res.data else set()
+
+    # Pull quotes from ZenQuotes API, skip already-sent ones (dedup by content hash)
+    import hashlib as _hashlib
+    import random as _random2
     quote_text = ""
     quote_author = ""
+    quote_id = ""
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get("https://api.quotable.io/quotes/random?limit=1")
+            resp = await client.get("https://zenquotes.io/api/quotes")
             if resp.status_code == 200:
-                data = resp.json()
-                # API returns a list with one item
-                item = data[0] if isinstance(data, list) else data
-                quote_text = item.get("content", "")
-                quote_author = item.get("author", "")
+                items = resp.json()
+                _random2.shuffle(items)
+                for item in items:
+                    q = item.get("q", "")
+                    qid = _hashlib.md5(q.encode()).hexdigest()[:12]
+                    if qid not in sent_ids:
+                        quote_text = q
+                        quote_author = item.get("a", "")
+                        quote_id = qid
+                        break
+                # All seen — clear oldest half and use first shuffled item
+                if not quote_text and items:
+                    logger.info(f"[motivation] all quotes seen for user={user_id}, resetting sent_quotes")
+                    supabase.table("sent_quotes").delete().eq("user_id", user_id).limit(max(1, len(sent_ids) // 2)).execute()
+                    quote_text = items[0].get("q", "")
+                    quote_author = items[0].get("a", "")
+                    quote_id = _hashlib.md5(quote_text.encode()).hexdigest()[:12]
     except Exception:
-        logger.warning("Quotable API unavailable — sending motivation without quote")
+        logger.warning("ZenQuotes API unavailable — sending motivation without quote")
+
+    # Build goal context line
+    if goal_names:
+        focus = _random.sample(goal_names, min(2, len(goal_names)))
+        goal_line = f"The user is working on: {' and '.join(focus)}. Connect the message to their actual work."
+    else:
+        goal_line = ""
 
     # Ask Gemini to deliver the quote's message in the coach's voice
     model = genai.GenerativeModel(
@@ -876,16 +907,25 @@ async def deliver_motivation_text(user_id: str) -> str:
             f"Deliver this idea to the user as a short SMS motivational message in your own voice: "
             f'"{quote_text}" — {quote_author}. '
             f"Don't quote it verbatim. Translate its energy into your style. "
+            f"{goal_line} "
             f"1-2 sentences max. No hashtags."
         )
     else:
         prompt = (
-            "Send a short motivational SMS right now. "
-            "1-2 sentences. Stay in character. No hashtags."
+            f"Send a short motivational SMS right now. {goal_line} "
+            f"1-2 sentences. Stay in character. No hashtags."
         )
 
     response = model.generate_content(prompt)
     text = response.text.strip()
+
+    # Record this quote as sent so it won't repeat
+    if quote_id:
+        try:
+            supabase.table("sent_quotes").insert({"user_id": user_id, "quote_id": quote_id}).execute()
+        except Exception:
+            logger.warning(f"[motivation] failed to record sent quote {quote_id} for user={user_id}")
+
     logger.info(f"Delivered motivation for user {user_id}: {text[:60]}...")
     return text
 
@@ -1640,6 +1680,35 @@ async def generate_activity_notification_text(
     except Exception as e:
         logger.error(f"generate_activity_notification_text failed for {user_id}/{activity}: {e}")
         raise  # let the caller use its fallback
+
+
+async def generate_activity_start_text(user_id: str, activity: str) -> str:
+    """Generate a short 'it's time, go now' message when the activity actually starts."""
+    coach_res = supabase.table("coach_settings").select(
+        "generated_system_prompt"
+    ).eq("user_id", user_id).eq("is_active", True).execute()
+    if not coach_res.data:
+        coach_res = supabase.table("coach_settings").select(
+            "generated_system_prompt"
+        ).eq("user_id", user_id).order("created_at", desc=True).limit(1).execute()
+
+    system_prompt = (
+        coach_res.data[0].get("generated_system_prompt") if coach_res.data else None
+    ) or await build_coach_personality(user_id)
+
+    try:
+        model = genai.GenerativeModel(
+            model_name="gemini-2.5-flash-lite",
+            system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
+        )
+        response = model.generate_content(
+            f"It's time for {activity} right now. Send a very short, punchy 'start now' message. "
+            f"One sentence. No questions. In character."
+        )
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"generate_activity_start_text failed for {user_id}/{activity}: {e}")
+        raise
 
 
 async def generate_preview_message(

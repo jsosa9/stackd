@@ -125,11 +125,13 @@ async def _goals_mentioned_gemini(text: str, goal_names: list[str]) -> list[str]
 
 
 async def _extract_time_gemini(text: str, goal_name: str) -> str | None:
-    """Extract a time of day from user reply, or None if not mentioned."""
+    """Extract the time specifically for goal_name from user reply, or None if not mentioned."""
     prompt = (
-        f"The user was asked what time they want to do '{goal_name}'. "
+        f"The user's message may mention times for multiple activities. "
+        f"Focus ONLY on the time mentioned for '{goal_name}'. "
         f"Their reply: \"{text}\"\n"
-        f"Extract the time if mentioned. Return a short string like '7:00 AM', '6:30 PM', 'morning', or null if no time given. "
+        f"Extract the time specifically for '{goal_name}'. Do not use times mentioned for other activities. "
+        f"Return a short string like '9:00 AM', '6:30 PM', 'morning', or null if no time given for '{goal_name}'. "
         f"Return ONLY the value, no JSON, no explanation."
     )
     try:
@@ -140,6 +142,69 @@ async def _extract_time_gemini(text: str, goal_name: str) -> str | None:
         return raw
     except Exception:
         logger.exception("[onboarding] time extraction failed")
+        return None
+
+
+async def _parse_yes_no(message_body: str) -> bool | None:
+    """Return True for yes, False for no, None if unclear."""
+    prompt = (
+        f"Does this message mean yes or no? Message: \"{message_body}\"\n"
+        f"Reply with exactly one word: YES, NO, or UNCLEAR."
+    )
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash-lite")
+        raw = model.generate_content(prompt).text.strip().upper()
+        if raw.startswith("YES"):
+            return True
+        if raw.startswith("NO"):
+            return False
+        return None
+    except Exception:
+        logger.exception("[onboarding] yes/no parse failed")
+        return None
+
+
+async def _parse_motivation_frequency(message_body: str) -> str | None:
+    """Map user reply to a schedule frequency value."""
+    prompt = (
+        f"The user was asked how many times a day they want motivation messages. "
+        f"Their reply: \"{message_body}\"\n"
+        f"Map to exactly one of: Once a day, 2x a day, 3x a day. "
+        f"Return only that exact string, or UNCLEAR if you can't tell."
+    )
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash-lite")
+        raw = model.generate_content(prompt).text.strip()
+        if raw in ("Once a day", "2x a day", "3x a day"):
+            return raw
+        return None
+    except Exception:
+        logger.exception("[onboarding] frequency parse failed")
+        return None
+
+
+async def _parse_motivation_window(message_body: str) -> dict | None:
+    """Extract start and end times from user reply. Returns {start: HH:MM, end: HH:MM} or None."""
+    prompt = (
+        f"The user was asked what hours they want motivation messages (e.g. '8am to 9pm'). "
+        f"Their reply: \"{message_body}\"\n"
+        f"Extract the start time and end time. "
+        f"Return JSON like: {{\"start\": \"8am\", \"end\": \"9pm\"}}. "
+        f"If you can't determine both times, return null. No markdown."
+    )
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash-lite")
+        raw = model.generate_content(prompt).text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        if raw.lower() in ("null", "none", ""):
+            return None
+        parsed = json.loads(raw)
+        start = _normalize_time(parsed.get("start", ""))
+        end = _normalize_time(parsed.get("end", ""))
+        if not start or not end:
+            return None
+        return {"start": start, "end": end}
+    except Exception:
+        logger.exception("[onboarding] window parse failed")
         return None
 
 
@@ -154,6 +219,37 @@ async def _coach_voice(system_prompt: str, instruction: str) -> str:
     except Exception:
         logger.exception("[onboarding] coach voice generation failed")
         return instruction
+
+
+def _normalize_time(time_str: str) -> str | None:
+    """Convert loose time strings like '8pm', '8:00 PM', 'morning' to HH:MM (24h).
+    Returns None for vague strings like 'before bed' that can't map to a clock time."""
+    import re as _re
+    s = time_str.strip().lower()
+    # Natural language shortcuts
+    natural = {"morning": "07:00", "afternoon": "14:00", "evening": "19:00",
+               "night": "21:00", "noon": "12:00", "midnight": "00:00"}
+    if s in natural:
+        return natural[s]
+    # HH:MM or H:MM with optional am/pm
+    m = _re.search(r'(\d{1,2}):(\d{2})\s*(am|pm)?', s)
+    if m:
+        h, mn, ampm = int(m.group(1)), int(m.group(2)), m.group(3)
+        if ampm == "pm" and h != 12:
+            h += 12
+        elif ampm == "am" and h == 12:
+            h = 0
+        return f"{h:02d}:{mn:02d}"
+    # Bare hour like "8pm", "9am"
+    m2 = _re.search(r'(\d{1,2})\s*(am|pm)', s)
+    if m2:
+        h, ampm = int(m2.group(1)), m2.group(2)
+        if ampm == "pm" and h != 12:
+            h += 12
+        elif ampm == "am" and h == 12:
+            h = 0
+        return f"{h:02d}:00"
+    return None
 
 
 def _send_sms(to: str, body: str) -> None:
@@ -276,6 +372,136 @@ async def _extract_goals_smart(message_body: str) -> list[str] | None:
     score = await _score_goals(message_body, goals)
     logger.info(f"[onboarding] goal extraction score={score} goals={goals}")
     return goals if score >= 80 else None
+
+
+# ---------------------------------------------------------------------------
+# Onboarding finalization (step → 5)
+# ---------------------------------------------------------------------------
+
+async def _finalize_onboarding(
+    user_id: str,
+    to_number: str,
+    coach_prompt: str,
+    motivation_prefs: dict,
+    supabase,
+) -> str:
+    """Advance to step 5, start trial clock, create schedule row, return wrap-up message."""
+    try:
+        supabase.table("users").update({"onboarding_step": 5}).eq("id", user_id).execute()
+    except Exception:
+        logger.exception(f"[onboarding] failed to advance step to 5 for user={user_id}")
+    try:
+        supabase.rpc("set_trial_end", {"p_user_id": user_id}).execute()
+    except Exception:
+        try:
+            trial_end = (datetime.now(timezone.utc) + timedelta(hours=48)).isoformat()
+            supabase.table("users").update({
+                "trial_ends_at": trial_end,
+                "subscription_status": "trial",
+            }).eq("id", user_id).execute()
+            logger.info(f"[onboarding] trial clock started for user={user_id}, ends={trial_end}")
+        except Exception:
+            logger.exception(f"[onboarding] failed to set trial_ends_at for user={user_id}")
+    try:
+        existing = supabase.table("schedule").select("user_id").eq("user_id", user_id).limit(1).execute()
+        if not existing.data:
+            schedule_row = {
+                "user_id": user_id,
+                "checkin_time": "08:00",
+                "timezone": "America/New_York",
+                "motivation_enabled": motivation_prefs.get("motivation_enabled", True),
+                "motivation_frequency": motivation_prefs.get("frequency", "Once a day"),
+                "motivation_window_start": motivation_prefs.get("window_start", "09:00"),
+                "motivation_window_end": motivation_prefs.get("window_end", "20:00"),
+                "motivation_styles": ["Hype & pump-up"],
+            }
+            supabase.table("schedule").insert(schedule_row).execute()
+            logger.info(f"[onboarding] schedule row created for user={user_id} prefs={motivation_prefs}")
+        else:
+            # Update motivation fields on existing row
+            supabase.table("schedule").update({
+                "motivation_enabled": motivation_prefs.get("motivation_enabled", True),
+                "motivation_frequency": motivation_prefs.get("frequency", "Once a day"),
+                "motivation_window_start": motivation_prefs.get("window_start", "09:00"),
+                "motivation_window_end": motivation_prefs.get("window_end", "20:00"),
+            }).eq("user_id", user_id).execute()
+    except Exception:
+        logger.exception(f"[onboarding] failed to create/update schedule row for user={user_id}")
+
+    wrap_up = await _coach_voice(
+        coach_prompt,
+        "All goals are scheduled. Tell the user you will be texting them on schedule and you are ready to get to work. One message, in character."
+    )
+    return wrap_up
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — motivation preferences
+# ---------------------------------------------------------------------------
+
+async def _handle_step_4(
+    user_id: str,
+    to_number: str,
+    coach_prompt: str,
+    message_body: str,
+    supabase,
+) -> str:
+    """Collect motivation preferences via a 3-sub-state mini state machine."""
+    ctx_res = (
+        supabase.table("user_context")
+        .select("id, description, metadata")
+        .eq("user_id", user_id)
+        .eq("type", "motivation_setup")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not ctx_res.data:
+        # Safety net: missing context — go straight to finalize with defaults
+        logger.warning(f"[onboarding] step 4 missing motivation_setup context for user={user_id}, finalizing with defaults")
+        return await _finalize_onboarding(user_id, to_number, coach_prompt, {}, supabase)
+
+    ctx_id = ctx_res.data[0]["id"]
+    sub_state = ctx_res.data[0]["description"]
+    metadata = ctx_res.data[0].get("metadata") or {}
+
+    if sub_state == "awaiting_opt_in":
+        answered_yes = await _parse_yes_no(message_body)
+        if answered_yes is None:
+            return await _coach_voice(coach_prompt, "The user didn't give a clear yes or no. Ask again if they want daily motivation messages from you. One sentence.")
+        if not answered_yes:
+            supabase.table("user_context").delete().eq("id", ctx_id).execute()
+            return await _finalize_onboarding(user_id, to_number, coach_prompt, {"motivation_enabled": False}, supabase)
+        supabase.table("user_context").update({"description": "awaiting_frequency"}).eq("id", ctx_id).execute()
+        return await _coach_voice(coach_prompt, "Ask how many times a day they want motivation messages — once, twice, or three times. Stay in character. One sentence.")
+
+    if sub_state == "awaiting_frequency":
+        frequency = await _parse_motivation_frequency(message_body)
+        if not frequency:
+            return await _coach_voice(coach_prompt, "The user wasn't clear. Ask again: once, twice, or three times a day for motivation messages? One sentence.")
+        supabase.table("user_context").update({
+            "description": "awaiting_window",
+            "metadata": {**metadata, "frequency": frequency},
+        }).eq("id", ctx_id).execute()
+        return await _coach_voice(coach_prompt, "Ask what hours they want to receive motivation — for example 8am to 9pm. One sentence, stay in character.")
+
+    if sub_state == "awaiting_window":
+        window = await _parse_motivation_window(message_body)
+        if not window:
+            return await _coach_voice(coach_prompt, "Ask them again for a start time and end time for motivation messages, like 8am to 9pm.")
+        supabase.table("user_context").delete().eq("id", ctx_id).execute()
+        prefs = {
+            "motivation_enabled": True,
+            "frequency": metadata.get("frequency", "Once a day"),
+            "window_start": window["start"],
+            "window_end": window["end"],
+        }
+        return await _finalize_onboarding(user_id, to_number, coach_prompt, prefs, supabase)
+
+    # Unknown sub-state — finalize with defaults
+    logger.warning(f"[onboarding] step 4 unknown sub_state='{sub_state}' for user={user_id}, finalizing")
+    supabase.table("user_context").delete().eq("id", ctx_id).execute()
+    return await _finalize_onboarding(user_id, to_number, coach_prompt, {}, supabase)
 
 
 # ---------------------------------------------------------------------------
@@ -416,8 +642,11 @@ async def handle_onboarding(
                 .execute()
             )
             if not ctx_res.data:
-                supabase.table("users").update({"onboarding_step": 5}).eq("id", user_id).execute()
-                return "You're all set. Your coach will be in touch."
+                supabase.table("users").update({"onboarding_step": 4}).eq("id", user_id).execute()
+                supabase.table("user_context").insert({"user_id": user_id, "type": "motivation_setup", "description": "awaiting_opt_in", "metadata": {}, "expires_at": _expires_24h()}).execute()
+                coach_res_fb = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
+                coach_prompt_fb = coach_res_fb.data[0].get("generated_system_prompt", "") if coach_res_fb.data else ""
+                return await _coach_voice(coach_prompt_fb, "Ask the user if they want daily motivation messages from you. Yes or no. One sentence.")
 
             ctx = json.loads(ctx_res.data[0]["description"])
             goals = ctx["goals"]
@@ -432,18 +661,21 @@ async def handle_onboarding(
             remaining_names = [g["name"] for g in remaining_goals]
 
             if not remaining_goals:
-                # remaining list drained but step never advanced — clean up
-                logger.warning(f"[onboarding] user={user_id} step=3 with empty remaining; finalizing")
+                logger.warning(f"[onboarding] user={user_id} step=3 with empty remaining; advancing to step 4")
                 supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "onboarding_goals").execute()
-                supabase.table("users").update({"onboarding_step": 5}).eq("id", user_id).execute()
-                return "You're all set. Your coach will be in touch."
+                supabase.table("users").update({"onboarding_step": 4}).eq("id", user_id).execute()
+                supabase.table("user_context").insert({"user_id": user_id, "type": "motivation_setup", "description": "awaiting_opt_in", "metadata": {}, "expires_at": _expires_24h()}).execute()
+                coach_res_rg = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
+                coach_prompt_rg = coach_res_rg.data[0].get("generated_system_prompt", "") if coach_res_rg.data else ""
+                return await _coach_voice(coach_prompt_rg, "Ask the user if they want daily motivation messages from you. Yes or no. One sentence.")
 
             if len(remaining_goals) == 1:
-                mentioned_names = [remaining_goals[0]["name"]]
+                mentioned_names = remaining_names
             else:
                 mentioned_names = await _goals_mentioned_gemini(message_body, remaining_names)
+                # If no specific goal named, user likely means all remaining — try all
                 if not mentioned_names:
-                    mentioned_names = [remaining_goals[0]["name"]]
+                    mentioned_names = remaining_names
 
             scheduled_any = False
             for goal in remaining_goals:
@@ -452,10 +684,21 @@ async def handle_onboarding(
                 days = await _parse_days_smart(message_body, goal["name"])
                 if not days:
                     continue
+                # Store days as lowercase full names to match scheduler's lookup
+                days_lower = [d.lower() for d in days]
                 time_str = await _extract_time_gemini(message_body, goal["name"])
-                update_payload: dict = {"days": days}
+                update_payload: dict = {"days": days_lower}
                 if time_str:
-                    update_payload["times_per_day"] = {"default": time_str}
+                    # Normalize to HH:MM 24h for scheduler's activity notification job
+                    normalized_time = _normalize_time(time_str)
+                    if normalized_time:
+                        # Build per-day schedule in format scheduler expects: {DayAbbr: {times: [HH:MM]}}
+                        day_abbrs = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                        full_to_abbr = {d.lower(): day_abbrs[i] for i, d in enumerate(
+                            ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
+                        )}
+                        times_map = {full_to_abbr[d]: {"times": [normalized_time]} for d in days_lower if d in full_to_abbr}
+                        update_payload["times_per_day"] = times_map
                 try:
                     supabase.table("goals").update(update_payload).eq("id", goal["id"]).execute()
                 except Exception:
@@ -474,20 +717,24 @@ async def handle_onboarding(
                 return clarify
 
             if not remaining_ids:
-                logger.info(f"[onboarding] user={user_id} all goals scheduled, finalizing step→5")
+                logger.info(f"[onboarding] user={user_id} all goals scheduled, step→4 (motivation prefs)")
                 try:
                     supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "onboarding_goals").execute()
                 except Exception:
                     logger.exception(f"[onboarding] failed to delete onboarding_goals context for user={user_id}")
-                try:
-                    supabase.table("users").update({"onboarding_step": 5}).eq("id", user_id).execute()
-                except Exception:
-                    logger.exception(f"[onboarding] failed to advance step to 5 for user={user_id}")
-                wrap_up = await _coach_voice(
+                supabase.table("users").update({"onboarding_step": 4}).eq("id", user_id).execute()
+                supabase.table("user_context").insert({
+                    "user_id": user_id,
+                    "type": "motivation_setup",
+                    "description": "awaiting_opt_in",
+                    "metadata": {},
+                    "expires_at": _expires_24h(),
+                }).execute()
+                opt_in_msg = await _coach_voice(
                     coach_prompt,
-                    "All goals are scheduled. Tell the user you will be texting them on schedule and you are ready to get to work. One message, in character."
+                    "Ask the user if they want daily motivation messages from you. Keep it in character. Yes or no question. One sentence."
                 )
-                return wrap_up
+                return opt_in_msg
 
             # Some goals still unscheduled — ask about all remaining at once
             ctx["remaining"] = remaining_ids
@@ -507,6 +754,12 @@ async def handle_onboarding(
         except Exception:
             logger.exception(f"[onboarding] step 3 unhandled exception for user={user_id}")
             return "Something went wrong scheduling your goals. Reply with the days and times and I'll try again."
+
+    # ── Step 4 — motivation preferences ──────────────────────────────────
+    if step == 4:
+        coach_res_4 = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
+        coach_prompt_4 = coach_res_4.data[0].get("generated_system_prompt", "") if coach_res_4.data else ""
+        return await _handle_step_4(user_id, from_number, coach_prompt_4, message_body, supabase)
 
     # ── Step 5+ — fall through to normal pipeline ─────────────────────────
     return None
