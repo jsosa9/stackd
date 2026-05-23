@@ -306,9 +306,6 @@ async def setup_and_intro(user_id: str, to_number: str, name: str, supabase) -> 
         )
 
         _send_sms(to_number, intro)
-        await asyncio.sleep(2)
-        goals_ask = await _coach_voice(system_prompt, "Ask the user what specific activities they want to work on. Tell them to name the actual activity, not the outcome. One message.")
-        _send_sms(to_number, goals_ask)
 
         supabase.table("users").update({"onboarding_step": 2}).eq("id", user_id).execute()
         logger.info(f"[onboarding] user={user_id} advanced to step 2")
