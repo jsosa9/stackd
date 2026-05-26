@@ -391,7 +391,7 @@ async def _finalize_onboarding(
         supabase.rpc("set_trial_end", {"p_user_id": user_id}).execute()
     except Exception:
         try:
-            trial_end = (datetime.now(timezone.utc) + timedelta(hours=48)).isoformat()
+            trial_end = (datetime.now(timezone.utc) + timedelta(hours=120)).isoformat()
             supabase.table("users").update({
                 "trial_ends_at": trial_end,
                 "subscription_status": "trial",

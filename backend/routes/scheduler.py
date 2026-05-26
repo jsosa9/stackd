@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, date
 from fastapi import APIRouter
 from supabase import create_client
 from services.messaging import send_reply_with_delay
-from services.billing import is_billable, generate_trial_warning_sms
+from services.billing import is_billable, generate_trial_warning_sms, generate_trial_upsell_sms, _get_checkout_url
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
@@ -1345,12 +1345,11 @@ def check_missed_notifications() -> None:
 
 def send_trial_warnings() -> None:
     """
-    Runs every hour. Sends in-character trial expiry warnings at:
-      - ~12 hours remaining (11-13h window)
-      - ~final warning (0-2h window)
-
-    Deduplicates via user_context rows with type='trial_warning'
-    created in the last 10 hours.
+    Runs every hour. Day-based upsell cadence using created_at as reference:
+      Days 1-3: no messages
+      Day 4 morning (8-10am local): in-character coach upsell with Stripe link
+      Day 5 morning (8-10am local): final in-character push if not converted
+      Day 6+: plain cutoff message once, then is_billable() blocks access
     """
     scheduler_logger.debug("Running trial warning job")
 
@@ -1359,10 +1358,9 @@ def send_trial_warnings() -> None:
 
         res = (
             supabase.table("users")
-            .select("id, phone, trial_ends_at")
+            .select("id, phone, created_at, subscription_status, sms_consent_given_at, paused")
             .eq("subscription_status", "trial")
             .eq("paused", False)
-            .not_.is_("trial_ends_at", "null")
             .not_.is_("sms_consent_given_at", "null")
             .execute()
         )
@@ -1374,47 +1372,68 @@ def send_trial_warnings() -> None:
                 continue
 
             try:
-                trial_ends = datetime.fromisoformat(
-                    user["trial_ends_at"].replace("Z", "+00:00")
-                )
-                hours_remaining = (trial_ends - now_utc).total_seconds() / 3600
+                created_at = datetime.fromisoformat(user["created_at"].replace("Z", "+00:00"))
+                trial_age_hours = (now_utc - created_at).total_seconds() / 3600
+                trial_day = int(trial_age_hours // 24) + 1
 
-                is_12h_window = 11 <= hours_remaining <= 13
-                is_final_window = 0 <= hours_remaining <= 2
-
-                if not is_12h_window and not is_final_window:
+                if trial_day < 4:
                     continue
 
-                # Dedup — skip if we already sent a trial warning in last 10 hours
-                ten_hours_ago = (now_utc - timedelta(hours=10)).isoformat()
+                if trial_day >= 6:
+                    existing = (
+                        supabase.table("user_context")
+                        .select("id")
+                        .eq("user_id", user_id)
+                        .eq("type", "trial_cutoff")
+                        .limit(1)
+                        .execute()
+                    )
+                    if existing.data:
+                        continue
+                    checkout_url = run_async(_get_checkout_url(user_id))
+                    msg = f"Your free trial has ended. To keep your coach, sign up here: {checkout_url}"
+                    send_sms(phone, msg)
+                    log_message(user_id, msg)
+                    supabase.table("user_context").insert({
+                        "user_id": user_id,
+                        "type": "trial_cutoff",
+                        "description": "sent",
+                    }).execute()
+                    scheduler_logger.info(f"Sent trial cutoff message to user={user_id}")
+                    continue
+
+                # Day 4 or 5 — only fire in morning window (8am-10am local time)
+                schedule_res = supabase.table("schedule").select("timezone").eq("user_id", user_id).limit(1).execute()
+                tz_str = schedule_res.data[0]["timezone"] if schedule_res.data else "America/New_York"
+                try:
+                    local_now = now_utc.astimezone(pytz.timezone(tz_str))
+                except Exception:
+                    local_now = now_utc
+                if not (8 <= local_now.hour < 10):
+                    continue
+
+                dedup_type = f"trial_day{trial_day}_upsell"
                 existing = (
                     supabase.table("user_context")
                     .select("id")
                     .eq("user_id", user_id)
-                    .eq("type", "trial_warning")
-                    .gte("created_at", ten_hours_ago)
+                    .eq("type", dedup_type)
                     .limit(1)
                     .execute()
                 )
                 if existing.data:
                     continue
 
-                hours_int = max(0, int(hours_remaining))
-                msg = run_async(generate_trial_warning_sms(user_id, hours_int))
+                days_active = min(trial_day - 1, 5)
+                msg = run_async(generate_trial_upsell_sms(user_id, trial_day, days_active))
                 send_sms(phone, msg)
                 log_message(user_id, msg)
-
-                # Record that we sent a warning
                 supabase.table("user_context").insert({
                     "user_id": user_id,
-                    "type": "trial_warning",
-                    "description": f"sent {hours_int}h trial warning",
-                    "expires_at": (now_utc + timedelta(hours=24)).isoformat(),
+                    "type": dedup_type,
+                    "description": f"sent day {trial_day} upsell",
                 }).execute()
-
-                scheduler_logger.info(
-                    f"Sent trial warning to user={user_id} ({hours_int}h remaining)"
-                )
+                scheduler_logger.info(f"Sent trial day {trial_day} upsell to user={user_id}")
 
             except Exception as e:
                 scheduler_logger.error(f"Trial warning failed for user={user_id}: {e}")

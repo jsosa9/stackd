@@ -174,6 +174,57 @@ async def cancel_user(user_id: str) -> None:
 # Trial warning SMS
 # ---------------------------------------------------------------------------
 
+async def _get_checkout_url(user_id: str) -> str:
+    try:
+        return await create_checkout_session(user_id)
+    except Exception:
+        logger.exception(f"[billing] failed to create checkout session for user={user_id}")
+        return os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+
+async def generate_trial_upsell_sms(user_id: str, trial_day: int, days_active: int) -> str:
+    """
+    Generate an in-character coach upsell SMS for day 4 or day 5 of the trial.
+    Uses the user's actual coach persona from coach_settings.
+    """
+    checkout_url = await _get_checkout_url(user_id)
+
+    try:
+        coach_res = (
+            supabase.table("coach_settings")
+            .select("generated_system_prompt")
+            .eq("user_id", user_id)
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        system_prompt = coach_res.data[0].get("generated_system_prompt", "") if coach_res.data else ""
+    except Exception:
+        system_prompt = ""
+
+    if trial_day == 4:
+        user_prompt = (
+            f"The user has been showing up for {days_active} days. Their free trial ends tomorrow. "
+            f"Tell them in your voice — reference that they've been putting in the work and ask if they're continuing. "
+            f"Include this link naturally: {checkout_url}. One to two sentences. No payment jargon. No emojis."
+        )
+    else:
+        user_prompt = (
+            f"This is the last day of the user's free trial. They haven't signed up yet. "
+            f"One final push in your voice — direct, in character. Include: {checkout_url}. One sentence. No emojis."
+        )
+
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        model = genai.GenerativeModel("gemini-2.5-flash-lite", system_instruction=system_prompt)
+        response = model.generate_content(user_prompt)
+        return response.text.strip()
+    except Exception:
+        logger.exception(f"[billing] Gemini upsell generation failed for user={user_id}")
+        return f"Trial ends soon. Stay in it: {checkout_url}"
+
+
 async def generate_trial_warning_sms(user_id: str, hours_remaining: int) -> str:
     """
     Generate an in-character trial warning SMS with a checkout link.
