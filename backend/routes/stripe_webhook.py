@@ -25,6 +25,7 @@ from supabase import create_client
 
 from services.billing import cancel_user, create_checkout_session
 from services.messaging import send_reply
+from routes.ai import HUMAN_BEHAVIOR_RULES
 
 load_dotenv()
 
@@ -77,7 +78,7 @@ async def _coach_voice_message(user_id: str, prompt: str) -> str:
 
         model = genai.GenerativeModel(
             "gemini-2.5-flash-lite",
-            system_instruction=system_prompt,
+            system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
         )
         return model.generate_content(prompt).text.strip()
     except Exception:

@@ -28,6 +28,7 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from supabase import create_client
 from routes.personas import persona_manager
+from routes.ai import HUMAN_BEHAVIOR_RULES
 
 load_dotenv()
 
@@ -540,7 +541,7 @@ async def _generate_voice_reply(
 
     model = genai.GenerativeModel(
         model_name="gemini-2.5-flash-lite",
-        system_instruction=system_prompt,
+        system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
     )
     chat     = model.start_chat(history=gemini_history)
     response = chat.send_message(user_prompt)

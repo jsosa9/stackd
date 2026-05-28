@@ -8,6 +8,7 @@ from fastapi import APIRouter
 from supabase import create_client
 from services.messaging import send_reply_with_delay
 from services.billing import is_billable, generate_trial_warning_sms, generate_trial_upsell_sms, _get_checkout_url
+from routes.ai import HUMAN_BEHAVIOR_RULES
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
@@ -449,7 +450,7 @@ def send_deadline_checkins() -> None:
                 # Generate deadline check-in with Gemini
                 model = genai.GenerativeModel(
                     model_name="gemini-2.5-flash-lite",
-                    system_instruction=system_prompt,
+                    system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
                 )
                 
                 prompt = (
@@ -724,7 +725,7 @@ def send_proactive_pattern_messages() -> None:
                 # Generate proactive message based on pattern type
                 model = genai.GenerativeModel(
                     model_name="gemini-2.5-flash-lite",
-                    system_instruction=system_prompt,
+                    system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
                 )
                 
                 if pattern["pattern_type"] == "quiet_day":
@@ -848,7 +849,7 @@ def send_milestone_celebrations() -> None:
                 # Generate special milestone message
                 model = genai.GenerativeModel(
                     model_name="gemini-2.5-flash-lite",
-                    system_instruction=system_prompt,
+                    system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
                 )
                 
                 goal_name = goal.get("activity", "your goal")
@@ -954,7 +955,7 @@ def send_weekly_reflections() -> None:
                 # Generate reflection
                 model = genai.GenerativeModel(
                     model_name="gemini-2.5-flash-lite",
-                    system_instruction=system_prompt,
+                    system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
                 )
                 
                 prompt = (
@@ -1069,7 +1070,7 @@ def detect_silent_users() -> None:
                 # Generate appropriate message
                 model = genai.GenerativeModel(
                     model_name="gemini-2.5-flash-lite",
-                    system_instruction=system_prompt,
+                    system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
                 )
                 
                 if escalation == "nuclear" and nuclear_msg:
