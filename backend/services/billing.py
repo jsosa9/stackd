@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 import stripe
 from dotenv import load_dotenv
 from supabase import create_client
+from routes.ai import HUMAN_BEHAVIOR_RULES
 
 load_dotenv()
 
@@ -202,24 +203,22 @@ async def generate_trial_upsell_sms(user_id: str, trial_day: int, days_active: i
     except Exception:
         system_prompt = ""
 
-    no_markdown = "No asterisks, no bold, no italics, no markdown of any kind. Plain text SMS only."
-
     if trial_day == 4:
         user_prompt = (
             f"The user has been showing up for {days_active} days. Their free trial ends tomorrow. "
             f"Tell them in your voice — reference that they've been putting in the work and ask if they're continuing. "
-            f"Include this link naturally: {checkout_url}. One to two sentences. No payment jargon. No emojis. {no_markdown}"
+            f"Include this link naturally: {checkout_url}. One to two sentences. No payment jargon."
         )
     else:
         user_prompt = (
             f"This is the last day of the user's free trial. They haven't signed up yet. "
-            f"One final push in your voice — direct, in character. Include: {checkout_url}. One sentence. No emojis. {no_markdown}"
+            f"One final push in your voice — direct, in character. Include: {checkout_url}. One sentence."
         )
 
     try:
         import google.generativeai as genai
         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        model = genai.GenerativeModel("gemini-2.5-flash-lite", system_instruction=system_prompt)
+        model = genai.GenerativeModel("gemini-2.5-flash-lite", system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}")
         response = model.generate_content(user_prompt)
         return response.text.strip()
     except Exception:
@@ -256,13 +255,13 @@ async def generate_trial_warning_sms(user_id: str, hours_remaining: int) -> str:
         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
         model = genai.GenerativeModel(
             "gemini-2.5-flash-lite",
-            system_instruction=system_prompt,
+            system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
         )
         prompt = (
             f"The user's free trial ends in {hours_remaining} hours. "
             f"Tell them in your voice that their time is almost up and they need to commit. "
             f"Give them this link: {checkout_url}. "
-            f"One to two sentences max. No emojis. No asterisks, no bold, no italics, no markdown. Plain text SMS only. Make it feel urgent but stay completely in character."
+            f"One to two sentences max. Make it feel urgent but stay completely in character."
         )
         response = model.generate_content(prompt)
         return response.text.strip()
