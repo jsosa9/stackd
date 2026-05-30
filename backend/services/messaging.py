@@ -2,6 +2,7 @@
 
 import logging
 import os
+import time
 
 import requests
 
@@ -10,8 +11,26 @@ logger = logging.getLogger(__name__)
 SENDBLUE_BASE = "https://api.sendblue.co/api"
 
 
+def _send_typing_indicator(to_number: str) -> None:
+    try:
+        requests.post(
+            f"{SENDBLUE_BASE}/send-typing-indicator",
+            headers={
+                "sb-api-key-id": os.getenv("SENDBLUE_API_KEY", ""),
+                "sb-api-secret-key": os.getenv("SENDBLUE_API_SECRET", ""),
+                "Content-Type": "application/json",
+            },
+            json={"number": to_number},
+            timeout=5,
+        )
+    except Exception:
+        logger.exception(f"Typing indicator failed for {to_number}")
+
+
 def send_reply(to_number: str, message: str) -> None:
     """Send a message via Sendblue REST API. Single source of truth for all outbound messages."""
+    _send_typing_indicator(to_number)
+    time.sleep(2)
     try:
         response = requests.post(
             f"{SENDBLUE_BASE}/send-message",
