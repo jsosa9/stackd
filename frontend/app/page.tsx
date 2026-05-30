@@ -221,6 +221,25 @@ export default function LandingPage() {
 
   return (
     <div style={{ background: 'var(--lp-cream)', color: 'var(--lp-ink)', fontFamily: 'var(--font-dm-sans), -apple-system, sans-serif' }}>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify({
+            "@context": "https://schema.org",
+            "@type": "Organization",
+            name: "stackd",
+            url: "https://stackd.chat",
+            logo: "https://stackd.chat/icon.svg",
+            description:
+              "SMS accountability coaching powered by AI. Pick a celebrity coach. Get your first text in 60 seconds.",
+            contactPoint: {
+              "@type": "ContactPoint",
+              email: "support@stackd.chat",
+              contactType: "customer support",
+            },
+          }),
+        }}
+      />
 
       {/* ══ NAVBAR ══════════════════════════════════════════════ */}
       <LandingNavbar />

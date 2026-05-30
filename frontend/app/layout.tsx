@@ -42,8 +42,23 @@ export const metadata: Metadata = {
   title: "stackd — Your coach is texting you",
   description:
     "Pick a celebrity coach. Share your goals. Get your first text in 60 seconds. No app. No login. Just text.",
-  icons: {
-    icon: "/icon.svg",
+  metadataBase: new URL("https://stackd.chat"),
+  icons: { icon: "/icon.svg" },
+  openGraph: {
+    title: "stackd — Your coach is texting you",
+    description:
+      "Pick a celebrity coach. Share your goals. Get your first text in 60 seconds.",
+    url: "https://stackd.chat",
+    siteName: "stackd",
+    images: [{ url: "/og.png", width: 1200, height: 630, alt: "stackd" }],
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "stackd — Your coach is texting you",
+    description:
+      "Pick a celebrity coach. Share your goals. Get your first text in 60 seconds.",
+    images: ["/og.png"],
   },
 };
 
