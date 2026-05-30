@@ -345,7 +345,7 @@ export default function Step2() {
               ))}
             </ul>
 
-            <p className="s2-pro-note">Dashboard is a Pro feature — free for your first 7 days.</p>
+            <p className="s2-pro-note">Dashboard coming soon.</p>
 
             <button onClick={handleSignIn} disabled={loading} aria-busy={loading} className="s2-google-btn">
               {loading ? (

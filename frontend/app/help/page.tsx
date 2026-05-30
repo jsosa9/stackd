@@ -222,7 +222,7 @@ export default function HelpPage() {
         <footer className="help-footer">
           <div className="help-footer-row">
             <span className="help-footer-logo">stackd</span>
-            <span className="help-footer-copy">© 2026 stackd · 7 days free · $9.99/mo after</span>
+            <span className="help-footer-copy">© 2026 stackd · 5 days free · $12.99/mo after</span>
           </div>
           <div className="help-footer-links">
             <Link href="/privacy">Privacy Policy</Link>

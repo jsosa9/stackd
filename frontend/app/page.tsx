@@ -231,7 +231,7 @@ export default function LandingPage() {
           <div className="lp-hero-inner">
             <div className="lp-badge">
               <span className="lp-badge-new">Free</span>
-              7-day trial · no credit card
+              5-day trial · no credit card
             </div>
             <h1 className="lp-h1">
               The voice that drives you.<br />
@@ -246,9 +246,9 @@ export default function LandingPage() {
               <p style={{ fontSize: 12, color: 'rgba(26,22,18,0.33)', marginTop: 12 }}>No app. No login. Just text.</p>
               <p style={{ fontSize: 11, color: 'rgba(26,22,18,0.38)', marginTop: 10, lineHeight: 1.5, maxWidth: 320 }}>
                 By texting us, you agree to receive automated AI coaching SMS messages from stackd. ~20–30 msgs/month. Msg &amp; data rates may apply. Reply STOP to cancel, HELP for info.{' '}
-                <a href="https://stackd-liart.vercel.app/privacy" style={{ color: 'rgba(26,22,18,0.45)', textDecoration: 'underline' }}>Privacy</a>
+                <a href="https://stackd.chat/privacy" style={{ color: 'rgba(26,22,18,0.45)', textDecoration: 'underline' }}>Privacy</a>
                 {' · '}
-                <a href="https://stackd-liart.vercel.app/terms" style={{ color: 'rgba(26,22,18,0.45)', textDecoration: 'underline' }}>Terms</a>
+                <a href="https://stackd.chat/terms" style={{ color: 'rgba(26,22,18,0.45)', textDecoration: 'underline' }}>Terms</a>
               </p>
             </div>
           </div>
@@ -444,11 +444,11 @@ export default function LandingPage() {
           </h2>
           <div className="lp-price-card reveal">
             <div className="lp-price-num">Free</div>
-            <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.28)', marginBottom: 8 }}>Free for 7 days · then $9.99/month, auto-renews monthly.</div>
+            <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.28)', marginBottom: 8 }}>Free for 5 days · then $12.99/month, auto-renews monthly.</div>
             <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.18)', marginBottom: 24 }}>Charged at end of trial. Cancel anytime before trial ends to avoid charge.</div>
             <div className="lp-price-hr" />
             <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 11, marginBottom: 28 }}>
-              {['~20–30 coaching texts/month', 'Any coach you can name', 'No app, no login', 'Cancel anytime'].map((item) => (
+              {['Unlimited coaching texts', 'Any coach you can name', 'No app, no login', 'Cancel anytime'].map((item) => (
                 <li key={item} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 14, color: 'rgba(255,255,255,0.55)' }}>
                   <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--lp-tan)', flexShrink: 0, display: 'inline-block' }} />
                   {item}
@@ -481,7 +481,7 @@ export default function LandingPage() {
       <footer style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 12, background: 'var(--lp-cream)', borderTop: '1px solid rgba(26,22,18,0.08)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
           <span className="lp-footer-logo">stackd</span>
-          <span style={{ fontSize: 12, color: 'rgba(26,22,18,0.22)' }}>© 2026 stackd · 7 days free · $9.99/mo after</span>
+          <span style={{ fontSize: 12, color: 'rgba(26,22,18,0.22)' }}>© 2026 stackd · 5 days free · $12.99/mo after</span>
         </div>
         <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
           <Link href="/privacy" style={{ fontSize: 12, color: 'rgba(26,22,18,0.35)', textDecoration: 'none' }}>Privacy Policy</Link>

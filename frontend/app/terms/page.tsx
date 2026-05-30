@@ -236,9 +236,9 @@ export default function TermsPage() {
             <div id="section-5" className="legal-section">
               <h2 className="legal-h2">5. Free Trial and Billing</h2>
               <ul className="legal-ul">
-                <li>New users receive a 7-day free trial</li>
+                <li>New users receive a 5-day free trial</li>
                 <li>No credit card is required to start</li>
-                <li>After the trial period the service is $9.99 per month</li>
+                <li>After the trial period the service is $12.99 per month</li>
                 <li>You will be notified before your trial ends</li>
                 <li>Cancel any time by texting STOP or emailing <a href="mailto:support@stackd.chat" className="legal-link">support@stackd.chat</a></li>
                 <li>Refunds are handled on a case by case basis — contact <a href="mailto:support@stackd.chat" className="legal-link">support@stackd.chat</a></li>

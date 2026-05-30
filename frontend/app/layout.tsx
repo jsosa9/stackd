@@ -42,6 +42,9 @@ export const metadata: Metadata = {
   title: "stackd — Your coach is texting you",
   description:
     "Pick a celebrity coach. Share your goals. Get your first text in 60 seconds. No app. No login. Just text.",
+  icons: {
+    icon: "/icon.svg",
+  },
 };
 
 export default function RootLayout({
