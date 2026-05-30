@@ -145,7 +145,17 @@ class PersonaManager:
             return None
 
     async def fetch_persona_by_name(self, name: str) -> Persona | None:
+        def _to_persona(row: dict) -> Persona:
+            return Persona(
+                personality_id=row["personality_id"],
+                name=row["name"],
+                system_instruction=row["system_instruction"] or "",
+                few_shot_examples=row.get("few_shot_examples") or [],
+                is_active=row.get("is_active", True),
+            )
+
         try:
+            # Step 1: exact case-insensitive match
             res = (
                 self.db.table("personas")
                 .select("*")
@@ -154,16 +164,22 @@ class PersonaManager:
                 .limit(1)
                 .execute()
             )
-            if not res.data:
-                return None
-            row = res.data[0]
-            return Persona(
-                personality_id=row["personality_id"],
-                name=row["name"],
-                system_instruction=row["system_instruction"] or "",
-                few_shot_examples=row.get("few_shot_examples") or [],
-                is_active=row.get("is_active", True),
+            if res.data:
+                return _to_persona(res.data[0])
+
+            # Step 2: substring match — "Goggins" finds "David Goggins" and vice versa
+            res = (
+                self.db.table("personas")
+                .select("*")
+                .ilike("name", f"%{name}%")
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
             )
+            if res.data:
+                return _to_persona(res.data[0])
+
+            return None
         except Exception as e:
             logger.error(f"fetch_persona_by_name failed for '{name}': {e}", exc_info=True)
             return None
