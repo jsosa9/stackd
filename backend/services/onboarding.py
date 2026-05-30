@@ -202,7 +202,7 @@ async def _parse_motivation_window(message_body: str) -> dict | None:
         end = _normalize_time(parsed.get("end", ""))
         if not start or not end:
             return None
-        return {"start": start, "end": end}
+        return {"start": start, "end": end, "start_display": parsed.get("start", ""), "end_display": parsed.get("end", "")}
     except Exception:
         logger.exception("[onboarding] window parse failed")
         return None
@@ -485,13 +485,42 @@ async def _handle_step_4(
     if sub_state == "awaiting_window":
         window = await _parse_motivation_window(message_body)
         if not window:
-            return await _coach_voice(coach_prompt, "Ask them again for a start time and end time for motivation messages, like 8am to 9pm.")
+            return await _coach_voice(coach_prompt, "Ask them again for a start time and end time for motivation messages. Give the example 8am to 9pm. One sentence.")
+        supabase.table("user_context").update({
+            "description": "confirming_window",
+            "metadata": {
+                **metadata,
+                "window_start": window["start"],
+                "window_end": window["end"],
+                "window_start_display": window["start_display"],
+                "window_end_display": window["end_display"],
+            },
+        }).eq("id", ctx_id).execute()
+        start_d = window["start_display"] or window["start"]
+        end_d = window["end_display"] or window["end"]
+        return await _coach_voice(
+            coach_prompt,
+            f"Confirm with the user: you'll send motivation messages from {start_d} to {end_d}. Ask if that window is correct. Yes or no. One sentence."
+        )
+
+    if sub_state == "confirming_window":
+        answered_yes = await _parse_yes_no(message_body)
+        start_d = metadata.get("window_start_display") or metadata.get("window_start", "")
+        end_d = metadata.get("window_end_display") or metadata.get("window_end", "")
+        if answered_yes is None:
+            return await _coach_voice(coach_prompt, f"Ask again: is {start_d} to {end_d} the right window for motivation messages? Yes or no. One sentence.")
+        if not answered_yes:
+            supabase.table("user_context").update({
+                "description": "awaiting_window",
+                "metadata": {k: v for k, v in metadata.items() if k not in ("window_start", "window_end", "window_start_display", "window_end_display")},
+            }).eq("id", ctx_id).execute()
+            return await _coach_voice(coach_prompt, "Ask them again for the time window for motivation messages. Give the example 8am to 9pm. One sentence, in character.")
         supabase.table("user_context").delete().eq("id", ctx_id).execute()
         prefs = {
             "motivation_enabled": True,
             "frequency": metadata.get("frequency", "Once a day"),
-            "window_start": window["start"],
-            "window_end": window["end"],
+            "window_start": metadata["window_start"],
+            "window_end": metadata["window_end"],
         }
         return await _finalize_onboarding(user_id, to_number, coach_prompt, prefs, supabase)
 

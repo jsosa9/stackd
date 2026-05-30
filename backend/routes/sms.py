@@ -33,6 +33,12 @@ OTP_MAX_ATTEMPTS = 5    # lock out after 5 wrong guesses
 
 # In-memory rate limiter: { phone: { count, window_start } }
 _rate_store: dict[str, dict] = {}
+
+# Adaptive message aggregation window
+# _pending_token: phone → latest token (reset on each new message)
+# _message_buffer: phone → ordered list of message bodies
+_pending_token: dict[str, str] = {}
+_message_buffer: dict[str, list[str]] = {}
 _RATE_PER_MINUTE = 5  # >5 msgs/min = bot/spam; real split-texters won't hit this
 
 # ---------------------------------------------------------------------------
@@ -219,8 +225,41 @@ async def handle_notification_reply(
 # Background inbound processor
 # ---------------------------------------------------------------------------
 
-async def _process_inbound(from_number: str, message_body: str, background_tasks: BackgroundTasks) -> None:
+async def _resolve_message_intent(messages: list[str]) -> str:
+    """Collapse multiple rapid-fire messages into one resolved intent using Gemini."""
+    import google.generativeai as genai
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    combined = "\n".join(f"- {m}" for m in messages)
+    prompt = (
+        f"A user sent these messages in rapid succession:\n{combined}\n\n"
+        f"Some may be corrections to earlier ones, or they may be adding context. "
+        f"Return a single plain-text string that captures the user's true combined intent. "
+        f"No explanation. Just the resolved message."
+    )
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash-lite")
+        return model.generate_content(prompt).text.strip()
+    except Exception:
+        logger.exception("[sms] intent resolution failed, using last message")
+        return messages[-1]
+
+
+async def _process_inbound(from_number: str, token: str, background_tasks: BackgroundTasks) -> None:
     """All inbound SMS logic runs here in the background so the webhook returns 200 instantly."""
+    # Adaptive window: wait 4s, skip if a newer message has arrived
+    await asyncio.sleep(4)
+    if _pending_token.get(from_number) != token:
+        logger.info(f"[sms] adaptive window: newer message pending for {from_number}, skipping")
+        return
+
+    messages = _message_buffer.pop(from_number, [])
+    _pending_token.pop(from_number, None)
+
+    if not messages:
+        return
+
+    message_body = messages[0] if len(messages) == 1 else await _resolve_message_intent(messages)
+
     try:
         link_token = _extract_link_token(message_body)
         if link_token:
@@ -412,8 +451,14 @@ async def sms_incoming(request: Request, background_tasks: BackgroundTasks):
 
     logger.info(f"Inbound message from {from_number}: {message_body[:80]}")
 
-    # Return 200 immediately so Blooio doesn't retry, process in background
-    background_tasks.add_task(_process_inbound, from_number, message_body, background_tasks)
+    # Buffer message and reset adaptive window token
+    import uuid as _uuid
+    token = str(_uuid.uuid4())
+    _pending_token[from_number] = token
+    _message_buffer.setdefault(from_number, []).append(message_body)
+
+    # Return 200 immediately, process after window closes
+    background_tasks.add_task(_process_inbound, from_number, token, background_tasks)
     return Response(content='{"ok":true}', media_type="application/json")
 
 
