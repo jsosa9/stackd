@@ -68,15 +68,25 @@ supabase = create_client(
 
 _PERSONALITY_SWAP_RE = re.compile(r'^[A-Z]{4}[0-9]{4}$')
 
-VALID_CATEGORIES = ("GOAL", "CREATE_GOAL", "NUTRITION", "TASK", "JOURNAL", "BET", "GENERAL")
+VALID_CATEGORIES = (
+    "GOAL", "CREATE_GOAL", "DELETE_GOAL",
+    "STATS_QUERY", "MOTIVATION_REQUEST",
+    "NUTRITION", "TASK", "JOURNAL", "BET", "GENERAL",
+)
 
 _CLASSIFIER_SYSTEM = (
     "You are classifying an SMS message for a coaching app.\n"
     "Return only one word. The category name, nothing else.\n\n"
     "CREATE_GOAL: user wants to add, create, or set up a new goal or habit they don't have yet. "
     "Examples: 'I want to start running', 'I want to add a goal', 'can we set up a new habit'\n"
+    "DELETE_GOAL: user wants to remove, delete, or stop tracking a goal. "
+    "Examples: 'remove my running goal', 'delete my gym habit', 'I want to stop tracking meditation'\n"
     "GOAL: user is checking in on or reporting progress on an existing goal. "
     "Examples: completed a workout, ran 3 miles, did their habit, just finished the gym\n"
+    "STATS_QUERY: user wants to see their goals, streaks, or progress. "
+    "Examples: 'what are my goals', 'show my streak', 'how am I doing', 'what goals do I have'\n"
+    "MOTIVATION_REQUEST: user explicitly wants motivation, a quote, or to be hyped up. "
+    "Examples: 'I need motivation', 'send me a quote', 'hype me up', 'I need a push'\n"
     "NUTRITION: any mention of food, eating, drinking, calories, meals, "
     "a burger, coffee, anything consumed\n"
     "TASK: any mention of a reminder, scheduling, time, tomorrow, later, "
@@ -268,6 +278,7 @@ async def handle_goal(user_id: str, message_body: str, user_timezone: str) -> st
             return ""
 
         goals_list = ", ".join(f"{g['id']}:{g['activity']}" for g in goals)
+        valid_ids  = {g["id"] for g in goals}
 
         model = genai.GenerativeModel(model_name="gemini-2.5-flash-lite")
         response = model.generate_content(
@@ -275,11 +286,19 @@ async def handle_goal(user_id: str, message_body: str, user_timezone: str) -> st
             f"Goals: {goals_list}. Message: {message_body}\n"
             f'Return JSON: {{"goal_id": "str", "completed": true/false, "metric": "str"}}'
         )
-        data = json.loads(_strip_json_fences(response.text))
+        try:
+            data = json.loads(_strip_json_fences(response.text))
+        except (json.JSONDecodeError, ValueError):
+            logger.warning(f"[goal] bad JSON from Gemini for user={user_id}: {response.text[:100]}")
+            data = {}
 
         goal_id   = data.get("goal_id", "")
         completed = bool(data.get("completed", False))
         metric    = data.get("metric") or message_body[:200]
+
+        # Only use goal_id if it actually belongs to this user
+        if goal_id not in valid_ids:
+            goal_id = ""
 
         if completed and goal_id:
             try:
@@ -320,7 +339,11 @@ async def handle_create_goal(user_id: str, message_body: str, user_timezone: str
             f"\"days\": [\"Monday\",\"Tuesday\",\"Wednesday\",\"Thursday\",\"Friday\",\"Saturday\",\"Sunday\"]}}\n\n"
             f"Return only valid JSON, nothing else."
         )
-        data = json.loads(_strip_json_fences(response.text))
+        try:
+            data = json.loads(_strip_json_fences(response.text))
+        except (json.JSONDecodeError, ValueError):
+            logger.warning(f"[create_goal] bad JSON from Gemini for user={user_id}: {response.text[:100]}")
+            data = {}
         activity = data.get("activity") or "new goal"
         category = data.get("category") or "personal"
         all_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -355,7 +378,11 @@ async def handle_nutrition(user_id: str, message_body: str, user_timezone: str) 
             f"Extract food and estimated calories from this message: {message_body}\n"
             f'Return JSON: {{"food_description": "str", "estimated_calories": int, "confidence": float}}'
         )
-        data = json.loads(_strip_json_fences(response.text))
+        try:
+            data = json.loads(_strip_json_fences(response.text))
+        except (json.JSONDecodeError, ValueError):
+            logger.warning(f"[nutrition] bad JSON from Gemini for user={user_id}: {response.text[:100]}")
+            data = {}
 
         food_desc = data.get("food_description") or message_body[:200]
         calories  = int(data.get("estimated_calories") or 0)
@@ -402,7 +429,11 @@ async def handle_task(user_id: str, message_body: str, user_timezone: str) -> st
             f'Return JSON: {{"description": "str", "scheduled_for_iso": "ISO 8601 UTC or null", '
             f'"reminder_message": "str"}}'
         )
-        data = json.loads(_strip_json_fences(response.text))
+        try:
+            data = json.loads(_strip_json_fences(response.text))
+        except (json.JSONDecodeError, ValueError):
+            logger.warning(f"[task] bad JSON from Gemini for user={user_id}: {response.text[:100]}")
+            data = {}
 
         description      = data.get("description") or message_body[:200]
         scheduled_for    = data.get("scheduled_for_iso")
@@ -457,7 +488,11 @@ async def handle_journal(user_id: str, message_body: str, user_timezone: str) ->
             f'"description": "one sentence summary as a fact about the user"'
             f'}}'
         )
-        data = json.loads(_strip_json_fences(response.text))
+        try:
+            data = json.loads(_strip_json_fences(response.text))
+        except (json.JSONDecodeError, ValueError):
+            logger.warning(f"[journal] bad JSON from Gemini for user={user_id}: {response.text[:100]}")
+            data = {}
 
         ctx_type    = data.get("type", "personal")
         description = data.get("description") or message_body[:200]
@@ -487,7 +522,11 @@ async def handle_bet(user_id: str, message_body: str, user_timezone: str) -> str
             f"Extract the social bet or accountability challenge from this message: {message_body}\n"
             f'Return JSON: {{"description": "str", "target": "str", "deadline_iso": "ISO 8601 UTC or null"}}'
         )
-        data = json.loads(_strip_json_fences(response.text))
+        try:
+            data = json.loads(_strip_json_fences(response.text))
+        except (json.JSONDecodeError, ValueError):
+            logger.warning(f"[bet] bad JSON from Gemini for user={user_id}: {response.text[:100]}")
+            data = {}
 
         description  = data.get("description") or message_body[:200]
         target       = data.get("target", "")
@@ -509,13 +548,105 @@ async def handle_bet(user_id: str, message_body: str, user_timezone: str) -> str
         return ""
 
 
+async def handle_delete_goal(user_id: str, message_body: str, user_timezone: str = "") -> str:
+    """Identify which goal the user wants to delete and remove it from the DB."""
+    try:
+        goals_res = (
+            supabase.table("goals")
+            .select("id, activity")
+            .eq("user_id", user_id)
+            .execute()
+        )
+        goals = goals_res.data or []
+        if not goals:
+            return "no goals to delete"
+
+        goals_list = ", ".join(f"{g['id']}:{g['activity']}" for g in goals)
+        valid_ids  = {g["id"] for g in goals}
+
+        model = genai.GenerativeModel(model_name="gemini-2.5-flash-lite")
+        response = model.generate_content(
+            f"The user wants to delete a goal. Identify which one.\n"
+            f"Goals: {goals_list}. Message: {message_body}\n"
+            f'Return JSON: {{"goal_id": "str", "activity": "str"}}'
+        )
+        try:
+            data = json.loads(_strip_json_fences(response.text))
+        except (json.JSONDecodeError, ValueError):
+            data = {}
+
+        goal_id  = data.get("goal_id", "")
+        activity = data.get("activity", "that goal")
+
+        if goal_id not in valid_ids:
+            return "could not identify which goal to delete"
+
+        supabase.table("goals").delete().eq("id", goal_id).eq("user_id", user_id).execute()
+        logger.info(f"[delete_goal] deleted goal='{activity}' ({goal_id}) for user={user_id}")
+        return f"Goal deleted: {activity}"
+
+    except Exception:
+        logger.exception(f"[delete_goal] failed for user={user_id}")
+        return ""
+
+
+async def handle_stats_query(user_id: str, message_body: str, user_timezone: str = "") -> str:
+    """Fetch goals and streaks and return a summary for the voice generator."""
+    try:
+        goals_res = (
+            supabase.table("goals")
+            .select("id, activity, category, days")
+            .eq("user_id", user_id)
+            .execute()
+        )
+        goals = goals_res.data or []
+
+        if not goals:
+            return "user has no goals set yet"
+
+        streaks_res = (
+            supabase.table("streaks")
+            .select("goal_id, current_streak, longest_streak")
+            .eq("user_id", user_id)
+            .execute()
+        )
+        streak_map = {s["goal_id"]: s for s in (streaks_res.data or [])}
+
+        lines = []
+        for g in goals:
+            s = streak_map.get(g["id"], {})
+            current = s.get("current_streak", 0)
+            longest = s.get("longest_streak", 0)
+            lines.append(
+                f"- {g['activity']} ({g.get('category', '')}): "
+                f"{current} day streak (best: {longest})"
+            )
+
+        summary = "User's goals and streaks:\n" + "\n".join(lines)
+        logger.info(f"[stats_query] fetched {len(goals)} goals for user={user_id}")
+        return summary
+
+    except Exception:
+        logger.exception(f"[stats_query] failed for user={user_id}")
+        return ""
+
+
+async def handle_motivation_request(user_id: str, message_body: str, user_timezone: str = "") -> str:
+    """Signal to the voice generator that the user wants on-demand motivation."""
+    logger.info(f"[motivation_request] user={user_id} requested motivation")
+    return "user is explicitly asking for motivation and a push right now"
+
+
 _HANDLER_MAP = {
-    "CREATE_GOAL": handle_create_goal,
-    "GOAL":        handle_goal,
-    "NUTRITION":   handle_nutrition,
-    "TASK":        handle_task,
-    "JOURNAL":     handle_journal,
-    "BET":         handle_bet,
+    "CREATE_GOAL":        handle_create_goal,
+    "DELETE_GOAL":        handle_delete_goal,
+    "STATS_QUERY":        handle_stats_query,
+    "MOTIVATION_REQUEST": handle_motivation_request,
+    "GOAL":               handle_goal,
+    "NUTRITION":          handle_nutrition,
+    "TASK":               handle_task,
+    "JOURNAL":            handle_journal,
+    "BET":                handle_bet,
     "GENERAL":     None,  # no DB write; voice generator handles it
 }
 
@@ -595,8 +726,25 @@ async def _generate_voice_reply(
         logger.exception(f"[voice] failed to fetch goals for user={user_id}")
         goals_context = "unknown"
 
+    try:
+        ctx_res = (
+            supabase.table("user_context")
+            .select("type, description")
+            .eq("user_id", user_id)
+            .in_("type", ["mood", "struggle", "win", "personal", "energy"])
+            .order("created_at", desc=True)
+            .limit(3)
+            .execute()
+        )
+        user_context_lines = [f"- {r['type']}: {r['description']}" for r in (ctx_res.data or [])]
+        user_context_block = "\n".join(user_context_lines) if user_context_lines else "none"
+    except Exception:
+        logger.exception(f"[voice] failed to fetch user_context for user={user_id}")
+        user_context_block = "unknown"
+
     user_prompt = (
         f"User's active goals:\n{goals_context}\n\n"
+        f"Recent user context (mood, wins, struggles):\n{user_context_block}\n\n"
         f"The user sent: {message_body}\n"
         f"Actions taken: {execution_result or 'none'}\n"
         "Reply as the coach. SMS only. Stay in character. Do not use any emojis. "
