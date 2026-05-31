@@ -77,8 +77,9 @@ VALID_CATEGORIES = (
 _CLASSIFIER_SYSTEM = (
     "You are classifying an SMS message for a coaching app.\n"
     "Return only one word. The category name, nothing else.\n\n"
-    "CREATE_GOAL: user wants to add, create, or set up a new goal or habit they don't have yet. "
-    "Examples: 'I want to start running', 'I want to add a goal', 'can we set up a new habit'\n"
+    "CREATE_GOAL: user is explicitly asking to ADD or TRACK a new goal or habit as an ongoing commitment. "
+    "Must have clear registration intent like: 'I want to add a goal', 'track this for me', 'add journaling as a habit', 'can we set this up as a goal'. "
+    "Do NOT classify as CREATE_GOAL if the user is just mentioning an activity casually, describing their day, answering a question, or saying what they want to do — those are GENERAL.\n"
     "DELETE_GOAL: user wants to remove, delete, or stop tracking a goal. "
     "Examples: 'remove my running goal', 'delete my gym habit', 'I want to stop tracking meditation'\n"
     "GOAL: user is checking in on or reporting progress on an existing goal. "
@@ -692,7 +693,7 @@ async def _generate_voice_reply(
                 logger.debug(f"[voice] loaded persona by personality_id='{personality_id}'")
 
         if persona:
-            persona_block = persona_manager.get_system_prompt(persona)
+            persona_block = _strip_markdown(persona_manager.get_system_prompt(persona))
             system_prompt = system_prompt + "\n\n" + persona_block
     except Exception:
         logger.exception("[voice] persona augmentation failed — continuing with base prompt")
@@ -779,8 +780,11 @@ async def _generate_voice_reply(
         f"The user sent: {message_body}\n"
         f"Actions taken: {execution_result or 'none'}\n"
         "Reply as the coach. SMS only. Stay in character. Do not use any emojis. "
-        "If the user checked in on a goal, ask one specific follow-up question. "
-        "How far, how long, how hard, what is next. Do not just react. Probe."
+        "Only reference activities that exist in the user's goal list above. "
+        "Never assume the user is committing to an activity or will do something — ask first. "
+        "Never tell the user you will remind them of something or that an activity starts now unless it was confirmed. "
+        "If the user checked in on a goal, ask one specific follow-up question about it. "
+        "How far, how long, how hard, what is next. Probe — but only about real registered goals."
     )
 
     model = genai.GenerativeModel(

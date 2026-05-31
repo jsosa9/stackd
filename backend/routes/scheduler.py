@@ -86,7 +86,7 @@ scheduler = BackgroundScheduler()
 
 def send_sms(to: str, body: str) -> None:
     """Send an SMS via Blooio with a human-like typing delay scaled to message length."""
-    send_reply_with_delay(to, body)
+    send_reply_with_delay(to, _strip_markdown(body))
     logger.info(f"Sent SMS to {to}")
 
 
@@ -1361,8 +1361,8 @@ def send_activity_notifications() -> None:
                                 scheduler_logger.info(f"30-MIN NOTIFIED: {name} / {activity} at {time_12h}")
 
                         if is_start:
-                            # Send start message if user confirmed OR if no reply yet (NOTIFIED)
-                            if existing_state in ("CONFIRMED", "NOTIFIED"):
+                            # Only send start message if user explicitly confirmed
+                            if existing_state == "CONFIRMED":
                                 try:
                                     from routes.ai import generate_activity_start_text
                                     start_body = run_async(generate_activity_start_text(user_id, activity))
