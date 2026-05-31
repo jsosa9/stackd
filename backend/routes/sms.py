@@ -119,9 +119,10 @@ _DECLINED_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 _RESCHEDULE_PATTERNS = re.compile(
-    r"\b(reschedule|tomorrow|later|move|shift|delay|another time|push|soon)\b"
-    r"|\b(\d{1,2}:\d{2})\b"   # time like "3:30"
-    r"|\b(\d{1,2}\s*(am|pm))\b",  # time like "3pm"
+    r"\b(reschedule|tomorrow|later|move|shift|delay|another time|push|soon|instead|different time|change it)\b"
+    r"|\b(\d{1,2}:\d{2})\b"          # time like "3:30"
+    r"|\b(\d{1,2}\s*(am|pm))\b"      # time like "3pm"
+    r"|can\s+we\s+do\s+\d",          # "can we do 8" / "can we do 8:30"
     re.IGNORECASE,
 )
 
@@ -242,6 +243,61 @@ async def _resolve_message_intent(messages: list[str]) -> str:
     except Exception:
         logger.exception("[sms] intent resolution failed, using last message")
         return messages[-1]
+
+
+async def _gemini_classify_notification_reply(message_body: str, activity: str) -> str | None:
+    """
+    Gemini fallback for ambiguous notification replies that regex couldn't classify.
+    Returns 'CONFIRMED', 'DECLINED', 'RESCHEDULED', or None (truly unclear).
+    """
+    import google.generativeai as genai
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash-lite")
+        prompt = (
+            f"The user has a scheduled activity: {activity}.\n"
+            f"They replied: \"{message_body}\"\n\n"
+            f"Classify their reply as exactly one of:\n"
+            f"CONFIRMED — they are doing the activity\n"
+            f"DECLINED — they are skipping it\n"
+            f"RESCHEDULED — they want to move it to a different time\n"
+            f"UNCLEAR — cannot determine intent from this message\n\n"
+            f"Reply with exactly one word."
+        )
+        result = model.generate_content(prompt).text.strip().upper()
+        return result if result in ("CONFIRMED", "DECLINED", "RESCHEDULED") else None
+    except Exception:
+        logger.exception("[sms] Gemini notification classifier failed")
+        return None
+
+
+async def _ask_notification_clarification(user_id: str, activity: str) -> str:
+    """Generate a natural in-voice clarification when intent cannot be parsed."""
+    import google.generativeai as genai
+    from routes.ai import HUMAN_BEHAVIOR_RULES
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    try:
+        coach_res = (
+            supabase.table("coach_settings")
+            .select("generated_system_prompt")
+            .eq("user_id", user_id)
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        system_prompt = coach_res.data[0].get("generated_system_prompt") if coach_res.data else ""
+        model = genai.GenerativeModel(
+            model_name="gemini-2.5-flash-lite",
+            system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
+        )
+        resp = model.generate_content(
+            f"The user replied to a reminder about '{activity}' but it's unclear if they're doing it, "
+            f"skipping it, or rescheduling. Ask them to clarify — in your voice, naturally. One sentence."
+        )
+        return resp.text.strip()
+    except Exception:
+        logger.exception("[sms] notification clarification generation failed")
+        return "Were you saying you're doing it or skipping it?"
 
 
 async def _process_inbound(from_number: str, token: str, background_tasks: BackgroundTasks) -> None:
@@ -384,9 +440,13 @@ async def _process_inbound(from_number: str, token: str, background_tasks: Backg
                 .execute()
             )
             if pending_res.data:
+                notif_row = pending_res.data[0]
                 notif_state = parse_notification_reply(message_body)
-                if notif_state:
-                    notif_row = pending_res.data[0]
+
+                if notif_state is None:
+                    notif_state = await _gemini_classify_notification_reply(message_body, notif_row["activity"])
+
+                if notif_state is not None:
                     response_text = await handle_notification_reply(
                         user_id, user_data, notif_row, notif_state, message_body
                     )
@@ -394,6 +454,14 @@ async def _process_inbound(from_number: str, token: str, background_tasks: Backg
                     logger.info(f"Notification reply {notif_state} for {notif_row['activity']} from {from_number}: {response_text[:80]}")
                     await _typing_delay(response_text)
                     send_reply(from_number, response_text)
+                    return
+                else:
+                    # Truly unclear — coach asks for clarification in their voice
+                    clarification = await _ask_notification_clarification(user_id, notif_row["activity"])
+                    _save_message(user_id, "outbound", clarification)
+                    logger.info(f"Notification clarification sent for {notif_row['activity']} to {from_number}: {clarification[:80]}")
+                    await _typing_delay(clarification)
+                    send_reply(from_number, clarification)
                     return
         except Exception:
             logger.exception(f"Notification reply intercept failed for user {user_id} — falling through to Gemini")
