@@ -1685,9 +1685,10 @@ async def generate_activity_notification_text(
             system_instruction=full_system,
         )
         prompt = (
-            f"{activity} is coming up at {time_12h}. Send a short reminder and ask if "
-            f"they're in. Work in naturally that they can reply YES to confirm, NO to skip, "
-            f"or RESCHEDULE to move it. 1-2 sentences. SMS only."
+            f"{activity} is at {time_12h}. Send a pre-activity reminder in your voice — "
+            f"short, punchy, in character. Ask if they're doing it. "
+            f"Somewhere in the message let them know they can reply YES, NO, or RESCHEDULE — "
+            f"but say it naturally, not like a menu. 2-3 sentences max. SMS only. No emojis."
         )
         response = model.generate_content(prompt)
         text = response.text.strip()
