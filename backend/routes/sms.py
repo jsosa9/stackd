@@ -246,8 +246,8 @@ async def _resolve_message_intent(messages: list[str]) -> str:
 
 async def _process_inbound(from_number: str, token: str, background_tasks: BackgroundTasks) -> None:
     """All inbound SMS logic runs here in the background so the webhook returns 200 instantly."""
-    # Adaptive window: wait 4s, skip if a newer message has arrived
-    await asyncio.sleep(4)
+    # Adaptive window: wait 5s, skip if a newer message has arrived
+    await asyncio.sleep(5)
     if _pending_token.get(from_number) != token:
         logger.info(f"[sms] adaptive window: newer message pending for {from_number}, skipping")
         return

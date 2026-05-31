@@ -531,7 +531,23 @@ async def _generate_voice_reply(
         for m in history
     ]
 
+    try:
+        goals_res = (
+            supabase.table("goals")
+            .select("activity, days, times_per_day")
+            .eq("user_id", user_id)
+            .execute()
+        )
+        goals_context = (
+            "\n".join(f"- {g['activity']}" for g in goals_res.data)
+            if goals_res.data else "none set"
+        )
+    except Exception:
+        logger.exception(f"[voice] failed to fetch goals for user={user_id}")
+        goals_context = "unknown"
+
     user_prompt = (
+        f"User's active goals:\n{goals_context}\n\n"
         f"The user sent: {message_body}\n"
         f"Actions taken: {execution_result or 'none'}\n"
         "Reply as the coach. SMS only. Stay in character. Do not use any emojis. "

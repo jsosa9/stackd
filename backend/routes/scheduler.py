@@ -360,12 +360,35 @@ def send_scheduled_reminders() -> None:
                 continue
             
             try:
-                # Send the reminder message
-                send_sms(phone, reminder["reminder_message"])
-                
+                # Generate reminder in coach voice
+                coach_res = (
+                    supabase.table("coach_settings")
+                    .select("generated_system_prompt")
+                    .eq("user_id", user.get("id"))
+                    .eq("is_active", True)
+                    .limit(1)
+                    .execute()
+                )
+                system_prompt = coach_res.data[0].get("generated_system_prompt") if coach_res.data else ""
+                raw_reminder = reminder["reminder_message"] or reminder.get("description") or "reminder"
+                try:
+                    model = genai.GenerativeModel(
+                        model_name="gemini-2.5-flash-lite",
+                        system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
+                    )
+                    resp = model.generate_content(
+                        f"Send a short reminder in your voice: {raw_reminder}. SMS only. 1-2 sentences max."
+                    )
+                    body = resp.text.strip()
+                except Exception as ai_err:
+                    scheduler_logger.warning(f"Reminder voice gen failed for {reminder_id}: {ai_err} — using raw")
+                    body = raw_reminder
+
+                send_sms(phone, body)
+
                 # Mark as sent
                 supabase.table("reminders").update({"sent": True}).eq("id", reminder_id).execute()
-                
+
                 scheduler_logger.info(
                     f"Sent reminder to {user.get('name', phone)}: {reminder['description']}"
                 )
@@ -1073,18 +1096,17 @@ def detect_silent_users() -> None:
                     system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
                 )
                 
-                if escalation == "nuclear" and nuclear_msg:
-                    message = nuclear_msg
+                if escalation == "gentle":
+                    prompt = "It's been a couple days. Check in on them — short, in your voice."
+                elif escalation == "direct":
+                    prompt = "3 days of silence. Go direct — call them out, ask what's going on with their goals. In your voice."
+                elif nuclear_msg:
+                    prompt = f"4+ days of silence. Use this as your starting point and say it in your voice: {nuclear_msg}"
                 else:
-                    if escalation == "gentle":
-                        prompt = "It's been a couple days — gentle check in. How are things?"
-                    elif escalation == "direct":
-                        prompt = "Haven't heard from you in 3 days. What's going on? How are your goals?"
-                    else:  # nuclear without custom message
-                        prompt = "Hey. It's been almost 4 days. Are you okay? I'm here if you need anything."
-                    
-                    response = model.generate_content(prompt)
-                    message = response.text.strip()
+                    prompt = "Almost 4 days of silence. This is your last attempt before you stop reaching out. Make it count. In your voice."
+
+                response = model.generate_content(prompt)
+                message = response.text.strip()
                 
                 # Send and log
                 send_sms(phone, message)
@@ -1131,6 +1153,25 @@ def send_activity_notifications() -> None:
                 continue
 
             user_id = user["id"]
+
+            # Skip if user is actively texting (inbound message in last 5 minutes)
+            try:
+                five_min_ago = (datetime.now(pytz.UTC) - timedelta(minutes=5)).isoformat()
+                recent_inbound = (
+                    supabase.table("messages")
+                    .select("id")
+                    .eq("user_id", user_id)
+                    .eq("direction", "inbound")
+                    .gte("created_at", five_min_ago)
+                    .limit(1)
+                    .execute()
+                )
+                if recent_inbound.data:
+                    scheduler_logger.debug(f"Skipping activity notification for {user_id} — active conversation")
+                    continue
+            except Exception as e:
+                scheduler_logger.warning(f"Could not check recent inbound for {user_id}: {e}")
+
             tz_name = sched.get("timezone") or "America/Los_Angeles"
 
             try:
@@ -1224,7 +1265,7 @@ def send_activity_notifications() -> None:
                                     body = run_async(generate_activity_notification_text(user_id, activity, time_12h))
                                 except Exception as ai_err:
                                     scheduler_logger.error(f"AI pre-notification failed for {user_id}/{activity}: {ai_err}")
-                                    body = f"Hey {name}! {activity} starts at {time_12h}. You in? (YES / NO / RESCHEDULE)"
+                                    body = f"{activity} at {time_12h}. You in? Reply YES, NO, or RESCHEDULE."
 
                                 send_sms(user["phone"], body)
                                 log_message(user_id, body)
@@ -1392,7 +1433,28 @@ def send_trial_warnings() -> None:
                     if existing.data:
                         continue
                     checkout_url = run_async(_get_checkout_url(user_id))
-                    msg = f"Your free trial has ended. To keep your coach, sign up here: {checkout_url}"
+                    coach_res = (
+                        supabase.table("coach_settings")
+                        .select("generated_system_prompt")
+                        .eq("user_id", user_id)
+                        .eq("is_active", True)
+                        .limit(1)
+                        .execute()
+                    )
+                    system_prompt = coach_res.data[0].get("generated_system_prompt") if coach_res.data else ""
+                    try:
+                        cutoff_model = genai.GenerativeModel(
+                            model_name="gemini-2.5-flash-lite",
+                            system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
+                        )
+                        cutoff_resp = cutoff_model.generate_content(
+                            f"The user's free trial has ended. Tell them in your voice — coaching stops here unless they sign up. "
+                            f"Keep it short and in character. Include this link exactly: {checkout_url}"
+                        )
+                        msg = cutoff_resp.text.strip()
+                    except Exception as ai_err:
+                        scheduler_logger.warning(f"Trial cutoff voice gen failed for {user_id}: {ai_err} — using fallback")
+                        msg = f"Your free trial has ended. To keep your coach, sign up here: {checkout_url}"
                     send_sms(phone, msg)
                     log_message(user_id, msg)
                     supabase.table("user_context").insert({
