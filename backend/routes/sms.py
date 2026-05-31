@@ -258,10 +258,10 @@ async def _gemini_classify_notification_reply(message_body: str, activity: str) 
             f"The user has a scheduled activity: {activity}.\n"
             f"They replied: \"{message_body}\"\n\n"
             f"Classify their reply as exactly one of:\n"
-            f"CONFIRMED — they are doing the activity\n"
-            f"DECLINED — they are skipping it\n"
-            f"RESCHEDULED — they want to move it to a different time\n"
-            f"UNCLEAR — cannot determine intent from this message\n\n"
+            f"CONFIRMED: they are doing the activity\n"
+            f"DECLINED: they are skipping it\n"
+            f"RESCHEDULED: they want to move it to a different time\n"
+            f"UNCLEAR: cannot determine intent from this message\n\n"
             f"Reply with exactly one word."
         )
         result = model.generate_content(prompt).text.strip().upper()
@@ -292,7 +292,7 @@ async def _ask_notification_clarification(user_id: str, activity: str) -> str:
         )
         resp = model.generate_content(
             f"The user replied to a reminder about '{activity}' but you couldn't tell if they're doing it, "
-            f"skipping it, or rescheduling. Ask them directly — in your voice — whether they're doing it, "
+            f"skipping it, or rescheduling. Ask them directly, in your voice, whether they're doing it, "
             f"not doing it, or need to move it. The user must understand they need to give you a clear answer. "
             f"One short sentence. Do not be vague."
         )
@@ -473,7 +473,7 @@ async def _process_inbound(from_number: str, token: str, background_tasks: Backg
         except Exception:
             logger.exception(f"process_inbound_sms failed for user {user_id}")
             response_text = (
-                f"Hey {user_data.get('name', 'there')}! Got your message — "
+                f"Hey {user_data.get('name', 'there')}! Got your message, "
                 "I'm having a quick moment but I'll be right back with you. 💪"
             )
 

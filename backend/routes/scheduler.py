@@ -880,7 +880,7 @@ def send_milestone_celebrations() -> None:
                 prompt = (
                     f"The user just hit a {current}-day streak on {goal_name}! "
                     f"This is a BIG milestone. Send a special, celebratory message that feels different "
-                    f"from a normal check-in — more significant and congratulatory. "
+                    f"from a normal check-in. Make it more significant and congratulatory. "
                     f"Make it personal and real, not generic. 2-3 sentences max."
                 )
                 
@@ -982,7 +982,7 @@ def send_weekly_reflections() -> None:
                 )
                 
                 prompt = (
-                    f"It's Sunday evening — time for a weekly reflection. "
+                    f"It's Sunday evening. Time for a weekly reflection. "
                     f"Look back at this week's conversations and summarize what the user accomplished. "
                     f"Ask them what went well and what they want to focus on next week. "
                     f"{f'Reference these upcoming commitments: {deadline_list}. ' if deadline_list else ''}"
@@ -1097,9 +1097,9 @@ def detect_silent_users() -> None:
                 )
                 
                 if escalation == "gentle":
-                    prompt = "It's been a couple days. Check in on them — short, in your voice."
+                    prompt = "It's been a couple days. Check in on them. Short, in your voice."
                 elif escalation == "direct":
-                    prompt = "3 days of silence. Go direct — call them out, ask what's going on with their goals. In your voice."
+                    prompt = "3 days of silence. Go direct. Call them out, ask what's going on with their goals. In your voice."
                 elif nuclear_msg:
                     prompt = f"4+ days of silence. Use this as your starting point and say it in your voice: {nuclear_msg}"
                 else:
@@ -1448,7 +1448,7 @@ def send_trial_warnings() -> None:
                             system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
                         )
                         cutoff_resp = cutoff_model.generate_content(
-                            f"The user's free trial has ended. Tell them in your voice — coaching stops here unless they sign up. "
+                            f"The user's free trial has ended. Tell them in your voice that coaching stops here unless they sign up. "
                             f"Keep it short and in character. Include this link exactly: {checkout_url}"
                         )
                         msg = cutoff_resp.text.strip()

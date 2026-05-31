@@ -72,17 +72,17 @@ VALID_CATEGORIES = ("GOAL", "NUTRITION", "TASK", "JOURNAL", "BET", "GENERAL")
 
 _CLASSIFIER_SYSTEM = (
     "You are classifying an SMS message for a coaching app.\n"
-    "Return only one word — the category name, nothing else.\n\n"
-    "GOAL — any mention of completing exercise, a workout, a habit, "
+    "Return only one word. The category name, nothing else.\n\n"
+    "GOAL: any mention of completing exercise, a workout, a habit, "
     "a run, steps, training, gym, or checking in on any physical activity\n"
-    "NUTRITION — any mention of food, eating, drinking, calories, meals, "
+    "NUTRITION: any mention of food, eating, drinking, calories, meals, "
     "a burger, coffee, anything consumed\n"
-    "TASK — any mention of a reminder, scheduling, time, tomorrow, later, "
+    "TASK: any mention of a reminder, scheduling, time, tomorrow, later, "
     "setting something up, or a commitment with a specific time\n"
-    "JOURNAL — any mention of feelings, tiredness, wanting to quit, "
+    "JOURNAL: any mention of feelings, tiredness, wanting to quit, "
     "emotions, mood, energy, stress, or mental state\n"
-    "BET — any mention of a challenge, bet, or competing with someone\n"
-    "GENERAL — only if it truly fits none of the above"
+    "BET: any mention of a challenge, bet, or competing with someone\n"
+    "GENERAL: only if it truly fits none of the above"
 )
 
 # ---------------------------------------------------------------------------
@@ -551,8 +551,8 @@ async def _generate_voice_reply(
         f"The user sent: {message_body}\n"
         f"Actions taken: {execution_result or 'none'}\n"
         "Reply as the coach. SMS only. Stay in character. Do not use any emojis. "
-        "If the user checked in on a goal, ask one specific follow-up question — "
-        "how far, how long, how hard, what is next. Do not just react. Probe."
+        "If the user checked in on a goal, ask one specific follow-up question. "
+        "How far, how long, how hard, what is next. Do not just react. Probe."
     )
 
     model = genai.GenerativeModel(
