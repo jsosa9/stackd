@@ -193,15 +193,20 @@ async def simulate_sms(req: SimulateSmsRequest):
     what would have been sent to the user — without calling Sendblue.
     """
     import asyncio
-    from routes.sms import _process_inbound
+    import uuid as _uuid
+    from routes.sms import _process_inbound, _pending_token, _message_buffer
 
     captured: list[str] = []
     bt = BackgroundTasks()
 
+    # Replicate the same token/buffer setup as the real SMS webhook
+    token = str(_uuid.uuid4())
+    _pending_token[req.from_number] = token
+    _message_buffer.setdefault(req.from_number, []).append(req.message)
+
     with _capture_replies(captured):
-        await _process_inbound(req.from_number, req.message, bt)
-        # Drain background tasks inline while patch is still active.
-        # Clear the list first so FastAPI doesn't re-run them after the response.
+        await _process_inbound(req.from_number, token, bt)
+        # Drain any background tasks spawned during processing
         tasks_to_run = list(bt.tasks)
         bt.tasks.clear()
         for task in tasks_to_run:
