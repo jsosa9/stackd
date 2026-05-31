@@ -9,6 +9,7 @@ from supabase import create_client
 from services.messaging import send_reply_with_delay
 from services.billing import is_billable, generate_trial_warning_sms, generate_trial_upsell_sms, _get_checkout_url
 from routes.ai import HUMAN_BEHAVIOR_RULES
+from services.message_router import _strip_markdown
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
@@ -175,12 +176,19 @@ def send_scheduled_checkins() -> None:
         day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
         today = day_names[local_now.weekday()]
 
-        goals_res = supabase.table("goals").select("activity, days").eq("user_id", user_id).execute()
-        todays_goals = [
-            g["activity"]
-            for g in (goals_res.data or [])
-            if today in (g.get("days") or [])
-        ]
+        goals_res = supabase.table("goals").select("id, activity, days").eq("user_id", user_id).execute()
+        today_str = local_now.strftime("%Y-%m-%d")
+        todays_goals = []
+        for g in (goals_res.data or []):
+            if today not in (g.get("days") or []):
+                continue
+            already_done = supabase.table("goal_completions").select("id") \
+                .eq("user_id", user_id).eq("goal_id", g["id"]) \
+                .eq("completed_date", today_str).execute()
+            if already_done.data:
+                logger.info(f"[checkin] goal '{g['activity']}' already completed today for user={user_id}, skipping")
+                continue
+            todays_goals.append(g["activity"])
 
         if not todays_goals:
             logger.info(f"No goals for {user.get('name', user_id)} on {today} — skipping check-in")
@@ -293,6 +301,17 @@ def send_motivation_messages() -> None:
             last_sent = datetime.fromisoformat(last_sent_str.replace("Z", "+00:00"))
             if (now_utc - last_sent).total_seconds() < min_gap_hours * 3600:
                 continue  # Too soon to send another
+
+        # Skip motivation if user has no goals scheduled today (rest day)
+        today_name = local_now.strftime("%A").lower()
+        goals_res = supabase.table("goals").select("days").eq("user_id", user_id).execute()
+        active_today = any(
+            today_name in (g.get("days") or [])
+            for g in (goals_res.data or [])
+        )
+        if not active_today and goals_res.data:
+            logger.info(f"[motivation] rest day for user={user_id} ({today_name}), skipping")
+            continue
 
         logger.info(f"Sending motivation to {user.get('name', user_id)}")
 
@@ -823,7 +842,47 @@ def send_milestone_celebrations() -> None:
 
         for streak in (streaks_res.data or []):
             current = streak.get("current_streak", 0)
-            
+
+            # Streak momentum reminder: fire at milestone - 1 (e.g. day 6 before day 7 milestone)
+            pre_milestones = {m - 1: m for m in milestones}
+            if current in pre_milestones:
+                upcoming = pre_milestones[current]
+                user = streak.get("users", {})
+                goal = streak.get("goals", {})
+                user_id = user.get("id")
+                phone = user.get("phone")
+                if user_id and phone and not user.get("paused") and user.get("sms_consent_given_at"):
+                    try:
+                        already = supabase.table("user_context").select("id") \
+                            .eq("user_id", user_id) \
+                            .eq("type", f"streak_pre_{upcoming}_{streak.get('goal_id')}") \
+                            .execute()
+                        if not already.data:
+                            coach = streak.get("coach_settings", {})
+                            system_prompt = coach.get("generated_system_prompt", "")
+                            model = genai.GenerativeModel(
+                                model_name="gemini-2.5-flash-lite",
+                                system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
+                            )
+                            goal_name = goal.get("activity", "your goal")
+                            resp = model.generate_content(
+                                f"The user is one day away from a {upcoming}-day streak on {goal_name}. "
+                                f"Send a short push — build the anticipation, make them feel it. "
+                                f"1-2 sentences max, in your voice."
+                            )
+                            msg = _strip_markdown(resp.text.strip())
+                            supabase.table("user_context").insert({
+                                "user_id": user_id,
+                                "type": f"streak_pre_{upcoming}_{streak.get('goal_id')}",
+                                "description": f"Pre-milestone reminder for {upcoming}-day streak",
+                                "expires_at": (datetime.utcnow() + timedelta(days=7)).isoformat(),
+                            }).execute()
+                            send_sms(phone, msg)
+                            log_message(user_id, msg)
+                            streaks_logger.info(f"Sent pre-milestone reminder ({upcoming}-1) to {user.get('name', phone)}")
+                    except Exception as e:
+                        streaks_logger.error(f"Failed pre-milestone reminder for user {user_id}: {e}")
+
             # Check if this is a milestone
             if current not in milestones:
                 continue
@@ -885,12 +944,12 @@ def send_milestone_celebrations() -> None:
                 )
                 
                 response = model.generate_content(prompt)
-                message = response.text.strip()
-                
+                message = _strip_markdown(response.text.strip())
+
                 # Send and log
                 send_sms(phone, message)
                 log_message(user_id, message)
-                
+
                 streaks_logger.info(
                     f"Sent {current}-day milestone celebration to {user.get('name', phone)} "
                     f"for goal: {goal_name}"
@@ -1065,16 +1124,29 @@ def detect_silent_users() -> None:
                 )
                 hours_silent = (now_utc - last_msg_time).total_seconds() / 3600
                 
-                # Determine escalation level
+                # Determine escalation level based on hours silent
+                # Each level fires exactly once (deduped via user_context)
                 if hours_silent < 48:
-                    continue  # Not silent enough
+                    continue
                 elif hours_silent < 72:
                     escalation = "gentle"
                 elif hours_silent < 96:
                     escalation = "direct"
-                else:
+                elif hours_silent < 120:
                     escalation = "nuclear"
-                
+                elif hours_silent < 168:
+                    escalation = "day5"
+                else:
+                    escalation = "day7"
+
+                # Dedup: only send each escalation level once per user
+                already_sent = supabase.table("user_context").select("id") \
+                    .eq("user_id", user_id) \
+                    .eq("type", f"silent_{escalation}") \
+                    .execute()
+                if already_sent.data:
+                    continue
+
                 # Get system prompt and context
                 coach_res = (
                     supabase.table("coach_settings")
@@ -1082,36 +1154,48 @@ def detect_silent_users() -> None:
                     .eq("user_id", user_id)
                     .execute()
                 )
-                
+
                 system_prompt = coach_res.data[0]["generated_system_prompt"] if coach_res.data else ""
                 nuclear_msg = coach_res.data[0].get("custom_coach_nuclear_option") if coach_res.data else None
-                
+
                 active_context = run_async(get_active_context(user_id))
                 if active_context:
                     system_prompt = f"{system_prompt}\n\n{active_context}"
-                
-                # Generate appropriate message
+
                 model = genai.GenerativeModel(
                     model_name="gemini-2.5-flash-lite",
                     system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
                 )
-                
+
                 if escalation == "gentle":
                     prompt = "It's been a couple days. Check in on them. Short, in your voice."
                 elif escalation == "direct":
                     prompt = "3 days of silence. Go direct. Call them out, ask what's going on with their goals. In your voice."
-                elif nuclear_msg:
-                    prompt = f"4+ days of silence. Use this as your starting point and say it in your voice: {nuclear_msg}"
-                else:
-                    prompt = "Almost 4 days of silence. This is your last attempt before you stop reaching out. Make it count. In your voice."
+                elif escalation == "nuclear":
+                    if nuclear_msg:
+                        prompt = f"4+ days of silence. Use this as your starting point and say it in your voice: {nuclear_msg}"
+                    else:
+                        prompt = "Almost 4 days of silence. This is your last real attempt. Make it count. In your voice."
+                elif escalation == "day5":
+                    prompt = "5 days of silence. No pressure tone — just let them know you're still here if they want to come back. One sentence, in your voice."
+                else:  # day7
+                    prompt = "7 days of silence. Final message. Ask if they want to pause or if they're done. No guilt, just real. In your voice."
 
                 response = model.generate_content(prompt)
-                message = response.text.strip()
-                
+                message = _strip_markdown(response.text.strip())
+
+                # Record this escalation so it only fires once
+                supabase.table("user_context").insert({
+                    "user_id": user_id,
+                    "type": f"silent_{escalation}",
+                    "description": f"Sent {escalation} silence message at {int(hours_silent)}h",
+                    "expires_at": (now_utc + timedelta(days=30)).isoformat(),
+                }).execute()
+
                 # Send and log
                 send_sms(phone, message)
                 log_message(user_id, message)
-                
+
                 scheduler_logger.info(
                     f"Sent {escalation} silence message to {user.get('name', phone)} "
                     f"({int(hours_silent)}h silent)"

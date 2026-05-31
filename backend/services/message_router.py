@@ -307,6 +307,14 @@ async def handle_goal(user_id: str, message_body: str, user_timezone: str) -> st
                 logger.info(f"[goal] streak updated for user={user_id} goal={goal_id}")
             except Exception:
                 logger.exception(f"[goal] update_streak failed for user={user_id} goal={goal_id}")
+            try:
+                supabase.table("goal_completions").upsert({
+                    "user_id": user_id,
+                    "goal_id": goal_id,
+                    "completed_date": date.today().isoformat(),
+                }, on_conflict="user_id,goal_id,completed_date").execute()
+            except Exception:
+                logger.exception(f"[goal] goal_completions upsert failed for user={user_id} goal={goal_id}")
 
         ctx_type = "win" if completed else "struggle"
         supabase.table("user_context").insert({
@@ -712,14 +720,36 @@ async def _generate_voice_reply(
     ]
 
     try:
+        user_res = supabase.table("users").select("name").eq("id", user_id).limit(1).execute()
+        user_name = user_res.data[0].get("name", "") if user_res.data else ""
+    except Exception:
+        logger.exception(f"[voice] failed to fetch user name for user={user_id}")
+        user_name = ""
+
+    try:
+        streaks_res = (
+            supabase.table("streaks")
+            .select("goal_id, current_streak, longest_streak")
+            .eq("user_id", user_id)
+            .execute()
+        )
+        streak_map = {s["goal_id"]: s["current_streak"] for s in (streaks_res.data or [])}
+    except Exception:
+        logger.exception(f"[voice] failed to fetch streaks for user={user_id}")
+        streak_map = {}
+
+    try:
         goals_res = (
             supabase.table("goals")
-            .select("activity, days, times_per_day")
+            .select("id, activity, days, times_per_day")
             .eq("user_id", user_id)
             .execute()
         )
         goals_context = (
-            "\n".join(f"- {g['activity']}" for g in goals_res.data)
+            "\n".join(
+                f"- {g['activity']} (streak: {streak_map.get(g['id'], 0)} days)"
+                for g in goals_res.data
+            )
             if goals_res.data else "none set"
         )
     except Exception:
@@ -743,7 +773,8 @@ async def _generate_voice_reply(
         user_context_block = "unknown"
 
     user_prompt = (
-        f"User's active goals:\n{goals_context}\n\n"
+        f"User's name: {user_name}\n"
+        f"User's active goals and streaks:\n{goals_context}\n\n"
         f"Recent user context (mood, wins, struggles):\n{user_context_block}\n\n"
         f"The user sent: {message_body}\n"
         f"Actions taken: {execution_result or 'none'}\n"
