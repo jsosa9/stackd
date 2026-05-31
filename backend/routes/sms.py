@@ -291,8 +291,10 @@ async def _ask_notification_clarification(user_id: str, activity: str) -> str:
             system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
         )
         resp = model.generate_content(
-            f"The user replied to a reminder about '{activity}' but it's unclear if they're doing it, "
-            f"skipping it, or rescheduling. Ask them to clarify — in your voice, naturally. One sentence."
+            f"The user replied to a reminder about '{activity}' but you couldn't tell if they're doing it, "
+            f"skipping it, or rescheduling. Ask them directly — in your voice — whether they're doing it, "
+            f"not doing it, or need to move it. The user must understand they need to give you a clear answer. "
+            f"One short sentence. Do not be vague."
         )
         return resp.text.strip()
     except Exception:
