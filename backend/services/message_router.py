@@ -68,13 +68,15 @@ supabase = create_client(
 
 _PERSONALITY_SWAP_RE = re.compile(r'^[A-Z]{4}[0-9]{4}$')
 
-VALID_CATEGORIES = ("GOAL", "NUTRITION", "TASK", "JOURNAL", "BET", "GENERAL")
+VALID_CATEGORIES = ("GOAL", "CREATE_GOAL", "NUTRITION", "TASK", "JOURNAL", "BET", "GENERAL")
 
 _CLASSIFIER_SYSTEM = (
     "You are classifying an SMS message for a coaching app.\n"
     "Return only one word. The category name, nothing else.\n\n"
-    "GOAL: any mention of completing exercise, a workout, a habit, "
-    "a run, steps, training, gym, or checking in on any physical activity\n"
+    "CREATE_GOAL: user wants to add, create, or set up a new goal or habit they don't have yet. "
+    "Examples: 'I want to start running', 'I want to add a goal', 'can we set up a new habit'\n"
+    "GOAL: user is checking in on or reporting progress on an existing goal. "
+    "Examples: completed a workout, ran 3 miles, did their habit, just finished the gym\n"
     "NUTRITION: any mention of food, eating, drinking, calories, meals, "
     "a burger, coffee, anything consumed\n"
     "TASK: any mention of a reminder, scheduling, time, tomorrow, later, "
@@ -95,6 +97,13 @@ def _strip_json_fences(text: str) -> str:
     if text.startswith("```"):
         parts = text.split("```")
         text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
+    return text
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove markdown bold/italic markers so they never reach SMS."""
+    text = re.sub(r'\*{1,2}([^*\n]+)\*{1,2}', r'\1', text)
+    text = re.sub(r'_{1,2}([^_\n]+)_{1,2}', r'\1', text)
     return text
 
 
@@ -296,6 +305,45 @@ async def handle_goal(user_id: str, message_body: str, user_timezone: str) -> st
         return ""
 
 
+async def handle_create_goal(user_id: str, message_body: str, user_timezone: str = "") -> str:
+    """Extract goal details from the user's message and insert a new goal into the DB."""
+    try:
+        model = genai.GenerativeModel(model_name="gemini-2.5-flash-lite")
+        response = model.generate_content(
+            f"The user wants to create a new goal. Extract the details.\n"
+            f"Message: \"{message_body}\"\n\n"
+            f"Return JSON with these keys:\n"
+            f"activity: short action phrase for the goal (e.g. journal, run, meditate, read)\n"
+            f"category: one of fitness, health, learning, personal, productivity\n"
+            f"days: array of day names they want to do it — if not mentioned assume all 7\n\n"
+            f"Example: {{\"activity\": \"journal\", \"category\": \"personal\", "
+            f"\"days\": [\"Monday\",\"Tuesday\",\"Wednesday\",\"Thursday\",\"Friday\",\"Saturday\",\"Sunday\"]}}\n\n"
+            f"Return only valid JSON, nothing else."
+        )
+        data = json.loads(_strip_json_fences(response.text))
+        activity = data.get("activity") or "new goal"
+        category = data.get("category") or "personal"
+        all_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        days = data.get("days") or all_days
+        if not isinstance(days, list):
+            days = all_days
+
+        supabase.table("goals").insert({
+            "user_id": user_id,
+            "activity": activity,
+            "category": category,
+            "days": days,
+            "times_per_day": {},
+        }).execute()
+
+        day_str = "every day" if len(days) >= 7 else ", ".join(days)
+        logger.info(f"[create_goal] created goal='{activity}' ({day_str}) for user={user_id}")
+        return f"New goal created: {activity} ({day_str})"
+    except Exception:
+        logger.exception(f"[create_goal] failed for user={user_id}")
+        return ""
+
+
 async def handle_nutrition(user_id: str, message_body: str, user_timezone: str) -> str:
     """
     Extract food and calories from the message.
@@ -462,12 +510,13 @@ async def handle_bet(user_id: str, message_body: str, user_timezone: str) -> str
 
 
 _HANDLER_MAP = {
-    "GOAL":      handle_goal,
-    "NUTRITION": handle_nutrition,
-    "TASK":      handle_task,
-    "JOURNAL":   handle_journal,
-    "BET":       handle_bet,
-    "GENERAL":   None,  # no DB write; voice generator handles it
+    "CREATE_GOAL": handle_create_goal,
+    "GOAL":        handle_goal,
+    "NUTRITION":   handle_nutrition,
+    "TASK":        handle_task,
+    "JOURNAL":     handle_journal,
+    "BET":         handle_bet,
+    "GENERAL":     None,  # no DB write; voice generator handles it
 }
 
 
@@ -561,7 +610,7 @@ async def _generate_voice_reply(
     )
     chat     = model.start_chat(history=gemini_history)
     response = chat.send_message(user_prompt)
-    reply    = _strip_emojis(response.text.strip())
+    reply    = _strip_markdown(_strip_emojis(response.text.strip()))
     logger.info(f"[voice] reply generated for user={user_id} ({len(reply)} chars)")
     return reply
 

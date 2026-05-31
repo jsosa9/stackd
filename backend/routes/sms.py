@@ -14,7 +14,7 @@ from supabase import create_client
 from dotenv import load_dotenv
 
 from routes.ai import generate_notification_response
-from services.message_router import process_inbound_sms
+from services.message_router import process_inbound_sms, _strip_markdown
 from services.messaging import send_reply
 from services.onboarding import handle_onboarding
 
@@ -90,7 +90,7 @@ def _verify_sendblue_signature(raw_body: bytes, signature_header: str) -> bool:
 
 def _send_reply(to_number: str, message: str) -> Response:
     """Send message via Blooio and return a plain 200 JSON response."""
-    send_reply(to_number, message)
+    send_reply(to_number, _strip_markdown(message))
     return Response(content='{"ok":true}', media_type="application/json")
 
 
@@ -455,7 +455,7 @@ async def _process_inbound(from_number: str, token: str, background_tasks: Backg
                     _save_message(user_id, "outbound", response_text)
                     logger.info(f"Notification reply {notif_state} for {notif_row['activity']} from {from_number}: {response_text[:80]}")
                     await _typing_delay(response_text)
-                    send_reply(from_number, response_text)
+                    send_reply(from_number, _strip_markdown(response_text))
                     return
                 else:
                     # Truly unclear — coach asks for clarification in their voice
@@ -463,7 +463,7 @@ async def _process_inbound(from_number: str, token: str, background_tasks: Backg
                     _save_message(user_id, "outbound", clarification)
                     logger.info(f"Notification clarification sent for {notif_row['activity']} to {from_number}: {clarification[:80]}")
                     await _typing_delay(clarification)
-                    send_reply(from_number, clarification)
+                    send_reply(from_number, _strip_markdown(clarification))
                     return
         except Exception:
             logger.exception(f"Notification reply intercept failed for user {user_id} — falling through to Gemini")
@@ -477,6 +477,7 @@ async def _process_inbound(from_number: str, token: str, background_tasks: Backg
                 "I'm having a quick moment but I'll be right back with you. 💪"
             )
 
+        response_text = _strip_markdown(response_text)
         _save_message(user_id, "outbound", response_text)
         logger.info(f"Outbound SMS to {from_number}: {response_text[:80]}")
         await _typing_delay(response_text)
