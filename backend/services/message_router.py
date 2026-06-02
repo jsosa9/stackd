@@ -77,9 +77,11 @@ VALID_CATEGORIES = (
 _CLASSIFIER_SYSTEM = (
     "You are classifying an SMS message for a coaching app.\n"
     "Return only one word. The category name, nothing else.\n\n"
-    "CREATE_GOAL: user is explicitly asking to ADD or TRACK a new goal or habit as an ongoing commitment. "
-    "Must have clear registration intent like: 'I want to add a goal', 'track this for me', 'add journaling as a habit', 'can we set this up as a goal'. "
-    "Do NOT classify as CREATE_GOAL if the user is just mentioning an activity casually, describing their day, answering a question, or saying what they want to do — those are GENERAL.\n"
+    "CREATE_GOAL: user is explicitly asking to register, add, or track a NEW habit/goal in the app as an ongoing commitment. "
+    "REQUIRED: the message must contain at least one of these exact trigger words or phrases: 'add', 'track', 'create', 'register', 'set up', 'start tracking', 'can we track', 'log this as', 'make this a goal', 'add as a goal'. "
+    "Examples that ARE CREATE_GOAL: 'I want to add a goal', 'can we track my running', 'add journaling as a habit to track', 'track this for me'. "
+    "Examples that are NOT CREATE_GOAL (classify as GENERAL): 'I want to start meditating', 'I want to begin reading', 'I want to write about my day', 'I want to reflect on things', 'maybe I should meditate', 'I want to do yoga', 'I want to wake up at 5am'. "
+    "The phrase 'I want to [verb] [activity]' without track/add/register is NEVER CREATE_GOAL — it is GENERAL.\n"
     "DELETE_GOAL: user wants to remove, delete, or stop tracking a goal. "
     "Examples: 'remove my running goal', 'delete my gym habit', 'I want to stop tracking meditation'\n"
     "GOAL: user is checking in on or reporting progress on an existing goal. "
@@ -746,16 +748,29 @@ async def _generate_voice_reply(
             .eq("user_id", user_id)
             .execute()
         )
+        goals_list = goals_res.data or []
         goals_context = (
             "\n".join(
                 f"- {g['activity']} (streak: {streak_map.get(g['id'], 0)} days)"
-                for g in goals_res.data
+                for g in goals_list
             )
-            if goals_res.data else "none set"
+            if goals_list else "none set"
         )
+        # Streak coaching hints: tell the AI how to use each streak
+        streak_hints = []
+        for g in goals_list:
+            s = streak_map.get(g["id"], 0)
+            if s >= 7:
+                streak_hints.append(f"{g['activity']}: {s}-day streak — this is serious momentum, make them feel what it would cost to break it")
+            elif s >= 3:
+                streak_hints.append(f"{g['activity']}: {s}-day streak — acknowledge the build, make it feel real")
+            elif s == 0:
+                streak_hints.append(f"{g['activity']}: no current streak — ask one question about what got in the way, do not lecture")
+        streak_coaching = "\n".join(streak_hints) if streak_hints else ""
     except Exception:
         logger.exception(f"[voice] failed to fetch goals for user={user_id}")
         goals_context = "unknown"
+        streak_coaching = ""
 
     try:
         ctx_res = (
@@ -773,9 +788,11 @@ async def _generate_voice_reply(
         logger.exception(f"[voice] failed to fetch user_context for user={user_id}")
         user_context_block = "unknown"
 
+    streak_section = f"\nStreak coaching context:\n{streak_coaching}\n" if streak_coaching else ""
     user_prompt = (
         f"User's name: {user_name}\n"
-        f"User's active goals and streaks:\n{goals_context}\n\n"
+        f"User's active goals and streaks:\n{goals_context}\n"
+        f"{streak_section}\n"
         f"Recent user context (mood, wins, struggles):\n{user_context_block}\n\n"
         f"The user sent: {message_body}\n"
         f"Actions taken: {execution_result or 'none'}\n"
@@ -783,8 +800,8 @@ async def _generate_voice_reply(
         "Only reference activities that exist in the user's goal list above. "
         "Never assume the user is committing to an activity or will do something — ask first. "
         "Never tell the user you will remind them of something or that an activity starts now unless it was confirmed. "
-        "If the user checked in on a goal, ask one specific follow-up question about it. "
-        "How far, how long, how hard, what is next. Probe — but only about real registered goals."
+        "If the user checked in on a goal, ask one specific follow-up question about quality or depth — how far, how long, how hard, what surprised them. "
+        "Probe — but only about real registered goals. Never ask more than one question."
     )
 
     model = genai.GenerativeModel(

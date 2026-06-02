@@ -1,0 +1,153 @@
+{
+  "passed": 21,
+  "total": 21,
+  "results": [
+    {
+      "label": "no_goals: returns SMS-length text",
+      "expected": "non-empty SMS",
+      "got": "What are you focused on today?...",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "no_goals: does NOT mention a specific goal",
+      "expected": "no goal name",
+      "got": "ok",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "before: returns SMS-length text",
+      "expected": "non-empty SMS",
+      "got": "Alright, it's 8 AM. You got th...",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "before: mentions the scheduled goal by name",
+      "expected": "contains 'go to the gym'",
+      "got": "Alright, it's 8 AM. You got the gym at 6 PM. That's the main event. But the day ",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "before: does NOT ask about past completion (nothing done yet)",
+      "expected": "no past-tense questions",
+      "got": "Alright, it's 8 AM. You got the gym at 6 PM. That's the main event. But the day isn't just about tha",
+      "pass": true,
+      "detail": "'before' messages should prime forward, not ask if something was done"
+    },
+    {
+      "label": "during: returns SMS-length text",
+      "expected": "non-empty SMS",
+      "got": "Alright, reading. You gonna do...",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "during: asks about pending goal ('reading'), not the confirmed one",
+      "expected": "mentions 'reading'",
+      "got": "Alright, reading. You gonna do that or is that just another thing you tell yourself you'll get to? W",
+      "pass": true,
+      "detail": "coach should ask about still-pending goal, not the one already confirmed"
+    },
+    {
+      "label": "after: returns SMS-length text",
+      "expected": "non-empty SMS",
+      "got": "Ok so you hit the gym and read...",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "after: mentions 'go to the gym' in end-of-day recap",
+      "expected": "contains 'go to the gym'",
+      "got": "Ok so you hit the gym and read. Felt strong, huh? Good. Don't get comfortable with 'strong'. What ar",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "during+missed: returns SMS-length text",
+      "expected": "non-empty SMS",
+      "got": "What are you reading right now...",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "during+missed: asks about pending 'reading' goal (by word or concept)",
+      "expected": "reading/book/page reference",
+      "got": "What are you reading right now?",
+      "pass": true,
+      "detail": "coach should ask about what's still pending, not re-interrogate the already-missed item"
+    },
+    {
+      "label": "during+missed: does NOT re-ask about already-MISSED gym goal",
+      "expected": "no re-interrogation of missed goal",
+      "got": "What are you reading right now?",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "all-done: returns SMS-length text",
+      "expected": "non-empty SMS",
+      "got": "You hit a new PR at the gym. G...",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "all-done: mentions 'go to the gym' specifically",
+      "expected": "contains 'go to the gym'",
+      "got": "You hit a new PR at the gym. Good. What was it? And what did you do to earn that? Anything else wort",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "all-done: includes a forward-looking or closing element",
+      "expected": "closing/tomorrow question",
+      "got": "You hit a new PR at the gym. Good. What was it? And what did you do to earn that? Anything else wort",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "all-missed: returns SMS-length text",
+      "expected": "non-empty SMS",
+      "got": "Gym missed. That's it? Nothing...",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "all-missed: mentions 'go to the gym'",
+      "expected": "contains 'go to the gym'",
+      "got": "Gym missed. That's it? Nothing else? Anything else at all, good or bad, worth noting from today?",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "mixed: returns SMS-length text",
+      "expected": "non-empty SMS",
+      "got": "Gym done. Reading missed. Ran ...",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "mixed: mentions completed goal 'go to the gym'",
+      "expected": "contains 'go to the gym'",
+      "got": "Gym done. Reading missed. Ran out of time. What else happened today worth noting?",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "Scheduler source: silent-day skip guard present",
+      "expected": "skip guard in send_nightly_summaries()",
+      "got": "found",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "Scheduler source: dedup via nightly_summary_sent in user_context",
+      "expected": "dedup guard present",
+      "got": "found",
+      "pass": true,
+      "detail": ""
+    }
+  ]
+}

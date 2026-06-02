@@ -1,0 +1,202 @@
+{
+  "passed": 28,
+  "total": 28,
+  "results": [
+    {
+      "label": "'I want to add a goal'",
+      "expected": "CREATE_GOAL",
+      "got": "CREATE_GOAL",
+      "pass": true,
+      "detail": "reason: explicit registration intent"
+    },
+    {
+      "label": "'can we track my running'",
+      "expected": "CREATE_GOAL",
+      "got": "CREATE_GOAL",
+      "pass": true,
+      "detail": "reason: explicit track intent"
+    },
+    {
+      "label": "'add journaling as a habit to track'",
+      "expected": "CREATE_GOAL",
+      "got": "CREATE_GOAL",
+      "pass": true,
+      "detail": "reason: explicit add + track"
+    },
+    {
+      "label": "'I want to start meditating'",
+      "expected": "GENERAL",
+      "got": "GENERAL",
+      "pass": true,
+      "detail": "reason: casual desire, not explicit goal registration"
+    },
+    {
+      "label": "'I want to begin reading'",
+      "expected": "GENERAL",
+      "got": "GENERAL",
+      "pass": true,
+      "detail": "reason: casual \u2014 no register/add/track language"
+    },
+    {
+      "label": "'I wake up at 5am'",
+      "expected": "GENERAL",
+      "got": "GENERAL",
+      "pass": true,
+      "detail": "reason: just describing routine \u2014 no goal intent"
+    },
+    {
+      "label": "'Maybe I should meditate at 5am'",
+      "expected": "GENERAL",
+      "got": "GENERAL",
+      "pass": true,
+      "detail": "reason: speculation, not registration"
+    },
+    {
+      "label": "'I did my run today'",
+      "expected": "GOAL",
+      "got": "GOAL",
+      "pass": true,
+      "detail": "reason: check-in on existing goal"
+    },
+    {
+      "label": "'Just finished the gym'",
+      "expected": "GOAL",
+      "got": "GOAL",
+      "pass": true,
+      "detail": "reason: check-in"
+    },
+    {
+      "label": "'I feel exhausted and want to quit'",
+      "expected": "JOURNAL",
+      "got": "JOURNAL",
+      "pass": true,
+      "detail": "reason: emotional state"
+    },
+    {
+      "label": "'remind me at 9am to meditate'",
+      "expected": "TASK",
+      "got": "TASK",
+      "pass": true,
+      "detail": "reason: scheduling request"
+    },
+    {
+      "label": "'I had a burger and coffee for lunch'",
+      "expected": "NUTRITION",
+      "got": "NUTRITION",
+      "pass": true,
+      "detail": "reason: food mention"
+    },
+    {
+      "label": "'what are my goals'",
+      "expected": "STATS_QUERY",
+      "got": "STATS_QUERY",
+      "pass": true,
+      "detail": "reason: querying own data"
+    },
+    {
+      "label": "'I need motivation right now'",
+      "expected": "MOTIVATION_REQUEST",
+      "got": "MOTIVATION_REQUEST",
+      "pass": true,
+      "detail": "reason: explicit motivation ask"
+    },
+    {
+      "label": "'delete my running goal'",
+      "expected": "DELETE_GOAL",
+      "got": "DELETE_GOAL",
+      "pass": true,
+      "detail": "reason: explicit deletion"
+    },
+    {
+      "label": "'I wake up at 5am and want to do something' \u2192 GENERAL",
+      "expected": "NOT CREATE_GOAL",
+      "got": "GENERAL",
+      "pass": true,
+      "detail": "safely routed away from goal creation"
+    },
+    {
+      "label": "'Maybe I should meditate at 5am' \u2192 GENERAL",
+      "expected": "NOT CREATE_GOAL",
+      "got": "GENERAL",
+      "pass": true,
+      "detail": "safely routed away from goal creation"
+    },
+    {
+      "label": "'I want to begin reading at noon' \u2192 TASK",
+      "expected": "NOT CREATE_GOAL",
+      "got": "TASK",
+      "pass": true,
+      "detail": "safely routed away from goal creation"
+    },
+    {
+      "label": "'I want to begin meditating' \u2192 GENERAL",
+      "expected": "NOT CREATE_GOAL",
+      "got": "GENERAL",
+      "pass": true,
+      "detail": "safely routed away from goal creation"
+    },
+    {
+      "label": "'I want to write about things that I did for the day' \u2192 GENERAL",
+      "expected": "NOT CREATE_GOAL",
+      "got": "GENERAL",
+      "pass": true,
+      "detail": "safely routed away from goal creation"
+    },
+    {
+      "label": "'I want to reflect on where I could improve' \u2192 GENERAL",
+      "expected": "NOT CREATE_GOAL",
+      "got": "GENERAL",
+      "pass": true,
+      "detail": "safely routed away from goal creation"
+    },
+    {
+      "label": "'30 minutes each morning' \u2192 TASK",
+      "expected": "NOT CREATE_GOAL",
+      "got": "TASK",
+      "pass": true,
+      "detail": "safely routed away from goal creation"
+    },
+    {
+      "label": "Goal count unchanged after casual messages",
+      "expected": "1 goals",
+      "got": "1 goals",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "No goal has a 05:00 scheduled time",
+      "expected": "0 goals with 05:00",
+      "got": "0 goals with 05:00: []",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "No NOTIFIED rows auto-escalated to STARTED without user confirmation",
+      "expected": "0 STARTED rows from unconfirmed notifications",
+      "got": "0 STARTED rows",
+      "pass": true,
+      "detail": "STARTED state can only come from CONFIRMED \u2014 the code fix is: `if existing_state == 'CONFIRMED'` (was: `in ('CONFIRMED', 'NOTIFIED')`)"
+    },
+    {
+      "label": "Scheduler source: start message gated on CONFIRMED only",
+      "expected": "new code present, old code absent",
+      "got": "new_code=True, old_code_removed=True",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "send_sms() calls _strip_markdown(body)",
+      "expected": "_strip_markdown(body) inside send_sms",
+      "got": "found",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "label": "Persona block stripped before system_instruction injection",
+      "expected": "_strip_markdown(persona_manager.get_system_prompt(persona))",
+      "got": "found",
+      "pass": true,
+      "detail": ""
+    }
+  ]
+}

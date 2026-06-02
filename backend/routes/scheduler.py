@@ -117,25 +117,20 @@ def run_async(coro):
 
 def send_scheduled_checkins() -> None:
     """
-    Runs every minute. Queries all users and checks if the current local time
-    matches their configured check-in time. For each match:
-      - Fetches the user's active goals for today's day of week
-      - Calls generate_checkin_text() for each goal
-      - Sends via Blooio
-      - Logs to messages table
-
-    Uses the user's own timezone to compare times accurately.
+    Runs every minute. At each user's configured check-in time, sends one
+    context-aware message based on where they are in their day:
+      - before: forward-looking, primes them for what's ahead
+      - during: references what's confirmed/missed, asks about pending
+      - after:  wraps the day, closes with tomorrow question
+      - no goals / no times: simple open check-in
     """
-    from routes.ai import generate_checkin_text
+    from routes.ai import generate_contextual_checkin
 
     logger.debug("Running scheduled check-in job")
 
-    # Fetch all users with their schedule preferences joined
     schedules_res = supabase.table("schedule").select(
         "user_id, checkin_time, timezone, users(id, phone, name, paused, sms_consent_given_at)"
     ).execute()
-
-    now_utc = datetime.utcnow()
 
     for sched in schedules_res.data or []:
         user = sched.get("users")
@@ -160,7 +155,6 @@ def send_scheduled_checkins() -> None:
 
         local_now = datetime.now(tz)
 
-        # Parse checkin_time in HH:MM format (e.g., "08:00", "14:30")
         checkin_time_str = sched.get("checkin_time", "08:00")
         try:
             checkin_hour, checkin_minute = map(int, checkin_time_str.split(":"))
@@ -169,40 +163,87 @@ def send_scheduled_checkins() -> None:
             continue
 
         if local_now.hour != checkin_hour or local_now.minute != checkin_minute:
-            continue  # Not their check-in time yet
-
-        # Get goals scheduled for today's day of week.
-        # days[] stored as full lowercase: "monday", "tuesday", …
-        day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-        today = day_names[local_now.weekday()]
-
-        goals_res = supabase.table("goals").select("id, activity, days").eq("user_id", user_id).execute()
-        today_str = local_now.strftime("%Y-%m-%d")
-        todays_goals = []
-        for g in (goals_res.data or []):
-            if today not in (g.get("days") or []):
-                continue
-            already_done = supabase.table("goal_completions").select("id") \
-                .eq("user_id", user_id).eq("goal_id", g["id"]) \
-                .eq("completed_date", today_str).execute()
-            if already_done.data:
-                logger.info(f"[checkin] goal '{g['activity']}' already completed today for user={user_id}, skipping")
-                continue
-            todays_goals.append(g["activity"])
-
-        if not todays_goals:
-            logger.info(f"No goals for {user.get('name', user_id)} on {today} — skipping check-in")
             continue
 
-        logger.info(f"Sending check-in to {user.get('name', user_id)} for {len(todays_goals)} goal(s)")
+        day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        today_lower = day_names[local_now.weekday()]
+        today_abbr  = local_now.strftime("%a")   # "Mon", "Tue", …
+        today_str   = local_now.strftime("%Y-%m-%d")
+        checkin_minutes = checkin_hour * 60 + checkin_minute
 
-        for goal in todays_goals:
+        # ── Goals scheduled today ────────────────────────────────────────────
+        goals_res = supabase.table("goals").select("id, activity, days, times_per_day").eq("user_id", user_id).execute()
+        todays_goals = [
+            g for g in (goals_res.data or [])
+            if today_lower in (g.get("days") or [])
+        ]
+
+        if not todays_goals:
+            logger.info(f"[checkin] no goals today for user={user_id} — sending open check-in")
             try:
-                text = run_async(generate_checkin_text(user_id, goal))
+                text = run_async(generate_contextual_checkin(
+                    user_id, "no_goals", [], [], [],
+                    checkin_time_display=local_now.strftime("%-I:%M %p"),
+                ))
                 send_sms(user["phone"], text)
                 log_message(user_id, text)
             except Exception:
-                logger.exception(f"Failed check-in for user {user_id}, goal '{goal}'")
+                logger.exception(f"[checkin] failed open check-in for user={user_id}")
+            continue
+
+        # ── Extract goal times for today ─────────────────────────────────────
+        goal_times = []  # list of (activity, "HH:MM")
+        for g in todays_goals:
+            tpd = g.get("times_per_day") or {}
+            day_sched = tpd.get(today_abbr) or {}
+            for t in (day_sched.get("times") or []):
+                goal_times.append((g["activity"], t))
+
+        # ── Determine before / during / after state ──────────────────────────
+        if not goal_times:
+            checkin_state = "no_times"
+        else:
+            goal_minutes = [
+                int(t.split(":")[0]) * 60 + int(t.split(":")[1])
+                for _, t in goal_times
+            ]
+            if checkin_minutes < min(goal_minutes):
+                checkin_state = "before"
+            elif checkin_minutes >= max(goal_minutes):
+                checkin_state = "after"
+            else:
+                checkin_state = "during"
+
+        # ── Activity notification states for today ───────────────────────────
+        notif_res = supabase.table("activity_notifications").select(
+            "activity, state, scheduled_time"
+        ).eq("user_id", user_id).gte("scheduled_time", today_str).lt(
+            "scheduled_time", today_str + "T23:59:59"
+        ).execute()
+        notification_states = notif_res.data or []
+
+        # ── Recent user_context (wins/struggles from today) ──────────────────
+        since_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        ctx_res = supabase.table("user_context").select("type, description").eq("user_id", user_id).in_(
+            "type", ["win", "struggle", "mood", "energy"]
+        ).gte("created_at", since_midnight).order("created_at", desc=True).limit(5).execute()
+        user_context_today = ctx_res.data or []
+
+        logger.info(f"[checkin] user={user_id} state={checkin_state} goals={len(todays_goals)} notifs={len(notification_states)}")
+
+        try:
+            text = run_async(generate_contextual_checkin(
+                user_id,
+                checkin_state,
+                goal_times,
+                notification_states,
+                user_context_today,
+                checkin_time_display=local_now.strftime("%-I:%M %p"),
+            ))
+            send_sms(user["phone"], text)
+            log_message(user_id, text)
+        except Exception:
+            logger.exception(f"[checkin] failed for user={user_id} state={checkin_state}")
 
 
 # ---------------------------------------------------------------------------
@@ -1590,10 +1631,114 @@ def send_trial_warnings() -> None:
         scheduler_logger.error(f"Critical error in trial warning job: {e}", exc_info=True)
 
 
+def send_nightly_summaries() -> None:
+    """
+    Runs every minute. At 9pm in each user's local timezone, sends one nightly
+    recap message in the coach's voice covering what they accomplished today.
+
+    Skips users who had no logged activity or check-in responses today.
+    Deduplicates via user_context row (type='nightly_summary_sent', description=YYYY-MM-DD).
+    """
+    from routes.ai import generate_nightly_summary
+
+    scheduler_logger.debug("Running nightly summary job")
+
+    schedules_res = supabase.table("schedule").select(
+        "user_id, timezone, users(id, phone, name, paused, sms_consent_given_at)"
+    ).execute()
+
+    SUMMARY_HOUR = 21  # 9pm local
+
+    for sched in schedules_res.data or []:
+        user = sched.get("users")
+        if not user or not user.get("phone"):
+            continue
+        if user.get("paused"):
+            continue
+        if not run_async(is_billable(user.get("id", ""))):
+            continue
+        if not user.get("sms_consent_given_at"):
+            continue
+
+        user_id = user["id"]
+        tz_name = sched.get("timezone", "America/New_York")
+
+        try:
+            tz = pytz.timezone(tz_name)
+        except Exception:
+            scheduler_logger.warning(f"[nightly] unknown tz '{tz_name}' for user={user_id}")
+            continue
+
+        local_now = datetime.now(tz)
+        if local_now.hour != SUMMARY_HOUR or local_now.minute != 0:
+            continue
+
+        today_str = local_now.strftime("%Y-%m-%d")
+
+        # Dedup: only one nightly summary per user per day
+        already = supabase.table("user_context").select("id").eq("user_id", user_id).eq(
+            "type", "nightly_summary_sent"
+        ).eq("description", today_str).execute()
+        if already.data:
+            continue
+
+        # Goal completions today
+        completions_res = supabase.table("goal_completions").select(
+            "goal_id, goals(activity)"
+        ).eq("user_id", user_id).eq("completed_date", today_str).execute()
+        completions = [
+            {"activity": row["goals"]["activity"]}
+            for row in (completions_res.data or [])
+            if row.get("goals")
+        ]
+
+        # Missed notifications today
+        notif_res = supabase.table("activity_notifications").select(
+            "activity, state"
+        ).eq("user_id", user_id).gte(
+            "scheduled_time", today_str
+        ).lt("scheduled_time", today_str + "T23:59:59").eq("state", "MISSED").execute()
+        missed_goals = [{"activity": n["activity"]} for n in (notif_res.data or [])]
+
+        # user_context from today (wins, struggles, mood, journal notes)
+        since_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        ctx_res = supabase.table("user_context").select("type, description").eq(
+            "user_id", user_id
+        ).in_("type", ["win", "struggle", "mood", "energy", "personal"]).gte(
+            "created_at", since_midnight
+        ).order("created_at", desc=True).limit(5).execute()
+        user_context_today = ctx_res.data or []
+
+        # Skip silent days — nothing logged at all
+        if not completions and not missed_goals and not user_context_today:
+            scheduler_logger.info(f"[nightly] user={user_id} had no activity today — skipping")
+            continue
+
+        scheduler_logger.info(
+            f"[nightly] user={user_id} done={len(completions)} missed={len(missed_goals)} ctx={len(user_context_today)}"
+        )
+
+        try:
+            text = run_async(generate_nightly_summary(
+                user_id, completions, missed_goals, user_context_today
+            ))
+            send_sms(user["phone"], text)
+            log_message(user_id, text)
+            # Mark sent for dedup
+            supabase.table("user_context").insert({
+                "user_id":    user_id,
+                "type":       "nightly_summary_sent",
+                "description": today_str,
+                "expires_at": (local_now + timedelta(days=2)).isoformat(),
+            }).execute()
+        except Exception:
+            scheduler_logger.exception(f"[nightly] failed for user={user_id}")
+
+
 def start_scheduler() -> None:
     """
     Register jobs and start the background scheduler. Called from main.py startup.
-    
+
     Jobs registered:
     1.  send_scheduled_checkins — every minute
     2.  send_motivation_messages — every 30 minutes
@@ -1607,6 +1752,7 @@ def start_scheduler() -> None:
     10. send_activity_notifications — every minute (30-min pre-activity SMS)
     11. check_missed_notifications — every minute
     12. send_trial_warnings — every hour (12h and final warning before trial expires)
+    13. send_nightly_summaries — every minute (fires at 9pm local per user)
     """
     if scheduler.running:
         logger.info("Scheduler already running — skipping start")
@@ -1718,6 +1864,15 @@ def start_scheduler() -> None:
         id="trial_warnings",
         replace_existing=True,
         misfire_grace_time=300,
+    )
+
+    # Nightly summaries: every minute (fires at 9pm in each user's local timezone)
+    scheduler.add_job(
+        send_nightly_summaries,
+        CronTrigger(minute="*"),
+        id="nightly_summaries",
+        replace_existing=True,
+        misfire_grace_time=30,
     )
 
     scheduler.start()
