@@ -122,9 +122,9 @@
       "detail": "safely routed away from goal creation"
     },
     {
-      "label": "'I want to begin reading at noon' \u2192 TASK",
+      "label": "'I want to begin reading at noon' \u2192 GENERAL",
       "expected": "NOT CREATE_GOAL",
-      "got": "TASK",
+      "got": "GENERAL",
       "pass": true,
       "detail": "safely routed away from goal creation"
     },
@@ -150,16 +150,16 @@
       "detail": "safely routed away from goal creation"
     },
     {
-      "label": "'30 minutes each morning' \u2192 TASK",
+      "label": "'30 minutes each morning' \u2192 GENERAL",
       "expected": "NOT CREATE_GOAL",
-      "got": "TASK",
+      "got": "GENERAL",
       "pass": true,
       "detail": "safely routed away from goal creation"
     },
     {
       "label": "Goal count unchanged after casual messages",
-      "expected": "1 goals",
-      "got": "1 goals",
+      "expected": "0 goals",
+      "got": "0 goals",
       "pass": true,
       "detail": ""
     },

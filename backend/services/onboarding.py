@@ -4,12 +4,12 @@ onboarding.py — SMS-driven coach onboarding state machine.
 State transitions (stored in users.onboarding_step):
   None/unknown → 0  : auto-create user, ask for coach name
   0 → 1             : start persona setup in background, ack
-  1 → 2             : (background) persona ready → in-character intro + ask goals
-  2 → 3             : extract goals via Gemini, start schedule loop
-  3 loop            : collect days per goal
-  3 → 4             : all goals scheduled, send confirmation
-  4 → 5             : final handoff message, pipeline takes over
-  5+                : return None (fall through to process_inbound_sms)
+  1 → 2             : (background) persona ready — sends intro + goals preview + city ask
+  2 → 3             : city received → store timezone → ask for goals+schedule
+  3 → 4             : extract goals+schedule → insert → send recap
+  4 → 5             : recap confirmed → ask check-in preference
+  5 → 6             : check-in preference received → finalize
+  6+                : return None (fall through to process_inbound_sms)
 """
 
 import asyncio
@@ -35,114 +35,75 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 _ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
+_DAY_ABBRS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+_FULL_TO_ABBR = {d.lower(): _DAY_ABBRS[i] for i, d in enumerate(
+    ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+)}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-async def _extract_days_gemini(text: str, goal_name: str) -> list[str]:
-    """Call 1: extract days from natural language reply."""
-    prompt = (
-        f"The user's message may mention schedules for multiple activities. "
-        f"Focus ONLY on the schedule for '{goal_name}'. "
-        f"Their message: \"{text}\"\n"
-        f"Extract the days of the week specifically for '{goal_name}'. "
-        f"IMPORTANT: phrases like 'every day', 'every night', 'each night', 'every morning', 'before bed', 'nightly', 'daily' mean ALL 7 days including weekends — never just weekdays. "
-        f"Do not use days mentioned for other activities in the message. "
-        f"Return a JSON array of full day names from: {_ALL_DAYS}. No markdown. No explanation."
-    )
+def _normalize_time(time_str: str) -> str | None:
+    """Convert loose time strings like '8pm', '8:00 PM', 'morning' to HH:MM (24h).
+    Returns None for vague strings that can't map to a clock time."""
+    import re as _re
+    s = time_str.strip().lower()
+    natural = {
+        "morning": "07:00", "afternoon": "14:00", "evening": "19:00",
+        "night": "21:00", "noon": "12:00", "midnight": "00:00",
+    }
+    if s in natural:
+        return natural[s]
+    m = _re.search(r'(\d{1,2}):(\d{2})\s*(am|pm)?', s)
+    if m:
+        h, mn, ampm = int(m.group(1)), int(m.group(2)), m.group(3)
+        if ampm == "pm" and h != 12:
+            h += 12
+        elif ampm == "am" and h == 12:
+            h = 0
+        return f"{h:02d}:{mn:02d}"
+    m2 = _re.search(r'(\d{1,2})\s*(am|pm)', s)
+    if m2:
+        h, ampm = int(m2.group(1)), m2.group(2)
+        if ampm == "pm" and h != 12:
+            h += 12
+        elif ampm == "am" and h == 12:
+            h = 0
+        return f"{h:02d}:00"
+    return None
+
+
+def _time_to_display(hhmm: str) -> str:
+    """Convert '18:00' to '6pm', '09:30' to '9:30am'."""
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash-lite")
-        raw = model.generate_content(prompt).text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-        days = json.loads(raw)
-        return [d for d in days if d in _ALL_DAYS]
+        h, m = map(int, hhmm.split(":"))
+        ampm = "am" if h < 12 else "pm"
+        h12 = h % 12 or 12
+        return f"{h12}:{m:02d}{ampm}" if m else f"{h12}{ampm}"
     except Exception:
-        logger.exception("[onboarding] day extraction failed")
-        return []
+        return hhmm
 
 
-async def _score_day_extraction(original_text: str, goal_name: str, extracted_days: list[str]) -> int:
-    """Call 2: independently score extraction accuracy 0-100."""
-    prompt = (
-        f"The user's message may cover schedules for multiple activities. "
-        f"Focus ONLY on what they said about '{goal_name}'. "
-        f"Their full message: \"{original_text}\"\n"
-        f"An AI extracted these days specifically for '{goal_name}': {extracted_days}\n"
-        f"Score 0-100 how accurately {extracted_days} matches what the user intends for '{goal_name}'. "
-        f"Rules: "
-        f"If the user clearly said specific days for '{goal_name}' (e.g. 'monday through friday', 'tuesday and thursday') and those days were extracted, score 90+. "
-        f"If the user said 'every day', 'every night', 'every morning', 'before bed', 'daily' for '{goal_name}' and all 7 days were extracted, score 95+. "
-        f"Only score below 50 if the days are genuinely wrong or fabricated for this goal. "
-        f"Return a single integer only. No explanation."
-    )
-    try:
-        model = genai.GenerativeModel("gemini-2.5-flash-lite")
-        raw = model.generate_content(prompt).text.strip()
-        match = re.search(r'\d+', raw)
-        return int(match.group()) if match else 0
-    except Exception:
-        logger.exception("[onboarding] day scoring failed")
-        return 0
-
-
-_EVERYDAY_PHRASES = [
-    "every day", "everyday", "every night", "each night", "every morning",
-    "each morning", "before bed", "nightly", "daily", "each day",
-]
-
-async def _parse_days_smart(text: str, goal_name: str) -> list[str]:
-    """Extract days then independently score — only return if confidence >= 70.
-    Bypasses scoring when all 7 days are extracted and an obvious everyday phrase is present."""
-    days = await _extract_days_gemini(text, goal_name)
-    if not days:
-        return []
-    text_lower = text.lower()
-    if set(days) == set(_ALL_DAYS) and any(p in text_lower for p in _EVERYDAY_PHRASES):
-        logger.info(f"[onboarding] everyday phrase detected for '{goal_name}', skipping score days={days}")
-        return days
-    score = await _score_day_extraction(text, goal_name, days)
-    logger.info(f"[onboarding] day extraction score={score} days={days}")
-    return days if score >= 70 else []
-
-
-async def _goals_mentioned_gemini(text: str, goal_names: list[str]) -> list[str]:
-    """Return which goal names from the list the user mentioned scheduling in their message."""
-    if not goal_names:
-        return []
-    prompt = (
-        f"Message: \"{text}\"\n"
-        f"Which of these goals did the user mention they want to schedule? {goal_names}\n"
-        f"Return a JSON array of matching goal names exactly as listed. Return [] if none. No markdown."
-    )
-    try:
-        model = genai.GenerativeModel("gemini-2.5-flash-lite")
-        raw = model.generate_content(prompt).text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-        mentioned = json.loads(raw)
-        return [g for g in mentioned if g in goal_names]
-    except Exception:
-        logger.exception("[onboarding] goals mentioned extraction failed")
-        return []
-
-
-async def _extract_time_gemini(text: str, goal_name: str) -> str | None:
-    """Extract the time specifically for goal_name from user reply, or None if not mentioned."""
-    prompt = (
-        f"The user's message may mention times for multiple activities. "
-        f"Focus ONLY on the time mentioned for '{goal_name}'. "
-        f"Their reply: \"{text}\"\n"
-        f"Extract the time specifically for '{goal_name}'. Do not use times mentioned for other activities. "
-        f"Return a short string like '9:00 AM', '6:30 PM', 'morning', or null if no time given for '{goal_name}'. "
-        f"Return ONLY the value, no JSON, no explanation."
-    )
-    try:
-        model = genai.GenerativeModel("gemini-2.5-flash-lite")
-        raw = model.generate_content(prompt).text.strip()
-        if raw.lower() in ("null", "none", ""):
-            return None
-        return raw
-    except Exception:
-        logger.exception("[onboarding] time extraction failed")
-        return None
+def _build_goal_payload(item: dict) -> dict:
+    """Build a goals table update payload from an extracted {activity, days, time} item."""
+    payload: dict = {}
+    days = item.get("days") or []
+    if days:
+        days_lower = [d.lower() for d in days]
+        payload["days"] = days_lower
+        time_str = item.get("time")
+        if time_str:
+            times_map = {
+                _FULL_TO_ABBR[d]: {"times": [time_str]}
+                for d in days_lower if d in _FULL_TO_ABBR
+            }
+            payload["times_per_day"] = times_map
+    elif item.get("time"):
+        # time but no days — store nothing yet, will be filled from recap correction
+        pass
+    return payload
 
 
 async def _parse_yes_no(message_body: str) -> bool | None:
@@ -164,47 +125,61 @@ async def _parse_yes_no(message_body: str) -> bool | None:
         return None
 
 
-async def _parse_motivation_frequency(message_body: str) -> str | None:
-    """Map user reply to a schedule frequency value."""
+async def _city_to_timezone(city: str) -> str:
+    """Convert a city name to an IANA timezone string. Returns America/New_York on failure."""
     prompt = (
-        f"The user was asked how many times a day they want motivation messages. "
-        f"Their reply: \"{message_body}\"\n"
-        f"Map to exactly one of: Once a day, 2x a day, 3x a day. "
-        f"Return only that exact string, or UNCLEAR if you can't tell."
+        f"What is the IANA timezone string for the city: {city}? "
+        f"Return only the timezone string, e.g. America/Los_Angeles or America/New_York. No explanation."
     )
     try:
+        import pytz
         model = genai.GenerativeModel("gemini-2.5-flash-lite")
-        raw = model.generate_content(prompt).text.strip()
-        if raw in ("Once a day", "2x a day", "3x a day"):
-            return raw
-        return None
+        raw = model.generate_content(prompt).text.strip().strip('"').strip("'")
+        pytz.timezone(raw)  # validate
+        return raw
     except Exception:
-        logger.exception("[onboarding] frequency parse failed")
-        return None
+        logger.warning(f"[onboarding] could not resolve timezone for city='{city}', defaulting to America/New_York")
+        return "America/New_York"
 
 
-async def _parse_motivation_window(message_body: str) -> dict | None:
-    """Extract start and end times from user reply. Returns {start: HH:MM, end: HH:MM} or None."""
+async def _extract_goals_and_schedule(message_body: str) -> list[dict] | None:
+    """
+    Single Gemini call returning [{activity, days, time}].
+    days is [] if not mentioned. time is None if not mentioned.
+    Returns None on extraction failure.
+    """
+    all_days_str = str(_ALL_DAYS)
     prompt = (
-        f"The user was asked what hours they want motivation messages (e.g. '8am to 9pm'). "
-        f"Their reply: \"{message_body}\"\n"
-        f"Extract the start time and end time. "
-        f"Return JSON like: {{\"start\": \"8am\", \"end\": \"9pm\"}}. "
-        f"If you can't determine both times, return null. No markdown."
+        f"The user described their habits and schedule. Extract each activity with its days and time.\n"
+        f"Message: \"{message_body}\"\n\n"
+        f"Rules:\n"
+        f"- activity: short name for the habit (use the user's own words)\n"
+        f"- days: array of day names from {all_days_str}. Empty array [] if not mentioned.\n"
+        f"  'every day', 'daily', 'every night', 'nightly' = all 7 days.\n"
+        f"  'weekdays' = Monday through Friday.\n"
+        f"- time: clock time string like '6:00 PM' or '18:00', or null if not mentioned.\n\n"
+        f"Return only a JSON array. No markdown. Example:\n"
+        f'[{{"activity": "gym", "days": ["Monday","Wednesday","Friday"], "time": "18:00"}}, '
+        f'{{"activity": "reading", "days": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"], "time": null}}]'
     )
     try:
         model = genai.GenerativeModel("gemini-2.5-flash-lite")
         raw = model.generate_content(prompt).text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-        if raw.lower() in ("null", "none", ""):
-            return None
         parsed = json.loads(raw)
-        start = _normalize_time(parsed.get("start", ""))
-        end = _normalize_time(parsed.get("end", ""))
-        if not start or not end:
+        if not isinstance(parsed, list) or not parsed:
             return None
-        return {"start": start, "end": end, "start_display": parsed.get("start", ""), "end_display": parsed.get("end", "")}
+        result = []
+        for item in parsed:
+            activity = (item.get("activity") or "").strip()
+            if not activity:
+                continue
+            days = [d for d in (item.get("days") or []) if d in _ALL_DAYS]
+            time_str = item.get("time")
+            normalized = _normalize_time(time_str) if time_str else None
+            result.append({"activity": activity, "days": days, "time": normalized})
+        return result if result else None
     except Exception:
-        logger.exception("[onboarding] window parse failed")
+        logger.exception("[onboarding] combined goal+schedule extraction failed")
         return None
 
 
@@ -213,7 +188,10 @@ async def _coach_voice(system_prompt: str, instruction: str) -> str:
     try:
         model = genai.GenerativeModel(
             "gemini-2.5-flash-lite",
-            system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}\n\nKeep it to one SMS message. No hyphens.",
+            system_instruction=(
+                f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}\n\n"
+                "Keep it to one SMS message. No em dashes. No bullet points. No markdown."
+            ),
         )
         return model.generate_content(instruction).text.strip()
     except Exception:
@@ -221,35 +199,49 @@ async def _coach_voice(system_prompt: str, instruction: str) -> str:
         return instruction
 
 
-def _normalize_time(time_str: str) -> str | None:
-    """Convert loose time strings like '8pm', '8:00 PM', 'morning' to HH:MM (24h).
-    Returns None for vague strings like 'before bed' that can't map to a clock time."""
-    import re as _re
-    s = time_str.strip().lower()
-    # Natural language shortcuts
-    natural = {"morning": "07:00", "afternoon": "14:00", "evening": "19:00",
-               "night": "21:00", "noon": "12:00", "midnight": "00:00"}
-    if s in natural:
-        return natural[s]
-    # HH:MM or H:MM with optional am/pm
-    m = _re.search(r'(\d{1,2}):(\d{2})\s*(am|pm)?', s)
-    if m:
-        h, mn, ampm = int(m.group(1)), int(m.group(2)), m.group(3)
-        if ampm == "pm" and h != 12:
-            h += 12
-        elif ampm == "am" and h == 12:
-            h = 0
-        return f"{h:02d}:{mn:02d}"
-    # Bare hour like "8pm", "9am"
-    m2 = _re.search(r'(\d{1,2})\s*(am|pm)', s)
-    if m2:
-        h, ampm = int(m2.group(1)), m2.group(2)
-        if ampm == "pm" and h != 12:
-            h += 12
-        elif ampm == "am" and h == 12:
-            h = 0
-        return f"{h:02d}:00"
-    return None
+async def _build_recap(user_id: str, coach_prompt: str, supabase) -> str:
+    """Build and return an in-character recap confirmation message from current goals in DB."""
+    goals = (
+        supabase.table("goals")
+        .select("activity, days, times_per_day")
+        .eq("user_id", user_id)
+        .execute()
+        .data or []
+    )
+
+    if not goals:
+        return await _coach_voice(
+            coach_prompt,
+            "Something went wrong saving goals. Ask the user to list their habits and schedule again. One sentence."
+        )
+
+    lines = []
+    for g in goals:
+        activity = g["activity"]
+        days = g.get("days") or []
+        times_per_day = g.get("times_per_day") or {}
+
+        days_str = " ".join(d.capitalize() for d in days) if days else "no days set"
+
+        time_str = None
+        for day_data in times_per_day.values():
+            t = (day_data.get("times") or [None])[0]
+            if t:
+                time_str = t
+                break
+
+        if time_str:
+            lines.append(f"{activity} {days_str} at {_time_to_display(time_str)}")
+        else:
+            lines.append(f"{activity} {days_str}")
+
+    goals_summary = ". ".join(lines)
+    recap_prompt = (
+        f"Confirm with the user what you have. Here is exactly what to confirm: {goals_summary}. "
+        "Ask them to say yes if that is right or tell you what to fix. "
+        "No em dashes, no bullets, no markdown. Stay in your voice. One SMS."
+    )
+    return await _coach_voice(coach_prompt, recap_prompt)
 
 
 def _send_sms(to: str, body: str) -> None:
@@ -261,13 +253,13 @@ def _expires_24h() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Background task — persona setup + intro
+# Background task — persona setup + 3-message intro
 # ---------------------------------------------------------------------------
 
 async def setup_and_intro(user_id: str, to_number: str, name: str, supabase) -> None:
     """
     Run after webhook returns. Fetches or creates the persona, inserts
-    coach_settings, sends the in-character intro, then advances step to 2.
+    coach_settings, sends 3 messages (intro, goals preview, city ask), advances step to 2.
     """
     try:
         persona = await persona_manager.fetch_persona_by_name(name)
@@ -277,7 +269,6 @@ async def setup_and_intro(user_id: str, to_number: str, name: str, supabase) -> 
 
         system_prompt = persona_manager.get_system_prompt(persona)
 
-        # Insert coach_settings — deactivate any existing rows first, then insert
         supabase.table("coach_settings").update({"is_active": False}).eq("user_id", user_id).execute()
         coach_insert = supabase.table("coach_settings").insert({
             "user_id": user_id,
@@ -288,24 +279,29 @@ async def setup_and_intro(user_id: str, to_number: str, name: str, supabase) -> 
             "is_active": True,
             "coach_setup_type": "celebrity",
         }).execute()
-        coach_row = coach_insert.data[0] if coach_insert.data else {
-            "user_id": user_id,
-            "personality_id": persona.personality_id,
-            "coach_name": persona.name,
-            "generated_system_prompt": system_prompt,
-            "is_active": True,
-        }
         logger.info(f"[onboarding] coach_settings created for user={user_id} coach={persona.name}")
 
-        # Generate in-character intro using existing voice function
-        intro = await _generate_voice_reply(
-            user_id,
-            "Introduce yourself to your new athlete. One SMS message only. Be completely in character.",
-            coach_row,
-            "",
+        # Message 1: in-character intro (one sentence)
+        intro = await _coach_voice(
+            system_prompt,
+            "Introduce yourself to your new athlete. One sentence only. Stay completely in character."
         )
-
         _send_sms(to_number, intro)
+
+        # Message 2: goals preview — persona voice opener + hardcoded example
+        goals_opener = await _coach_voice(
+            system_prompt,
+            "Ask what habits the user wants to track and when. One short sentence in your voice. Do not include an example."
+        )
+        goals_msg = f"{goals_opener} Something like gym Monday Wednesday Friday at 6pm or reading every night at 9pm."
+        _send_sms(to_number, goals_msg)
+
+        # Message 3: city ask — in character
+        city_msg = await _coach_voice(
+            system_prompt,
+            "Ask what city they are in so you know their time zone. One short sentence in your voice."
+        )
+        _send_sms(to_number, city_msg)
 
         supabase.table("users").update({"onboarding_step": 2}).eq("id", user_id).execute()
         logger.info(f"[onboarding] user={user_id} advanced to step 2")
@@ -316,77 +312,22 @@ async def setup_and_intro(user_id: str, to_number: str, name: str, supabase) -> 
 
 
 # ---------------------------------------------------------------------------
-# Goal extraction
-# ---------------------------------------------------------------------------
-
-async def _extract_goals(message_body: str) -> list[str]:
-    prompt = (
-        f"Extract the specific activities or habits the user wants to do from this message. "
-        f"Use the user's exact words — do not paraphrase or rename. "
-        f"Only include schedulable activities (e.g. 'weight lifting', 'jogging', 'meditation'), not outcomes (e.g. 'build muscle', 'lose weight'). "
-        f"Message: {message_body}\n"
-        f"Return a valid JSON array of short activity name strings only. No markdown."
-    )
-    try:
-        model = genai.GenerativeModel(model_name="gemini-2.5-flash-lite")
-        response = model.generate_content(prompt)
-        text = response.text.strip()
-        if text.startswith("```"):
-            parts = text.split("```")
-            text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
-        return json.loads(text)
-    except Exception:
-        logger.exception("[onboarding] goal extraction failed")
-        return []
-
-
-async def _score_goals(message_body: str, extracted_goals: list[str]) -> int:
-    """Independently score 0-100 whether extracted_goals are accurate schedulable activities from message_body."""
-    prompt = (
-        f"A user listed their goals. Their message: \"{message_body}\"\n"
-        f"An AI extracted these as schedulable activities: {extracted_goals}\n"
-        f"Score how accurately and completely these represent the specific activities the user wants to schedule. "
-        f"100 = exact match, correct activity names, nothing missing or renamed. "
-        f"Penalize heavily if: outcomes are included instead of activities (e.g. 'build muscle' instead of 'weight lifting'), "
-        f"user's exact words were changed, or real activities were missed. "
-        f"Return a single integer 0-100 only. No explanation."
-    )
-    try:
-        model = genai.GenerativeModel("gemini-2.5-flash-lite")
-        raw = model.generate_content(prompt).text.strip()
-        match = re.search(r'\d+', raw)
-        return int(match.group()) if match else 0
-    except Exception:
-        logger.exception("[onboarding] goal scoring failed")
-        return 0
-
-
-async def _extract_goals_smart(message_body: str) -> list[str] | None:
-    """Extract goals then independently score — only return if confidence >= 80."""
-    goals = await _extract_goals(message_body)
-    if not goals:
-        return None
-    score = await _score_goals(message_body, goals)
-    logger.info(f"[onboarding] goal extraction score={score} goals={goals}")
-    return goals if score >= 80 else None
-
-
-# ---------------------------------------------------------------------------
-# Onboarding finalization (step → 5)
+# Onboarding finalization
 # ---------------------------------------------------------------------------
 
 async def _finalize_onboarding(
     user_id: str,
     to_number: str,
     coach_prompt: str,
-    motivation_prefs: dict,
+    checkin_time: str | None,
     supabase,
 ) -> str:
-    """Advance to step 5, start trial clock, create schedule row, return wrap-up message."""
+    """Advance to step 6, start trial clock, create schedule row, return wrap-up message."""
     try:
-        supabase.table("users").update({"onboarding_step": 5}).eq("id", user_id).execute()
+        supabase.table("users").update({"onboarding_step": 6}).eq("id", user_id).execute()
     except Exception:
-        logger.exception(f"[onboarding] failed to advance step to 5 for user={user_id}")
+        logger.exception(f"[onboarding] failed to advance step to 6 for user={user_id}")
+
     try:
         supabase.rpc("set_trial_end", {"p_user_id": user_id}).execute()
     except Exception:
@@ -399,135 +340,54 @@ async def _finalize_onboarding(
             logger.info(f"[onboarding] trial clock started for user={user_id}, ends={trial_end}")
         except Exception:
             logger.exception(f"[onboarding] failed to set trial_ends_at for user={user_id}")
+
+    # Read timezone stored during step 2
+    tz_res = (
+        supabase.table("user_context")
+        .select("description")
+        .eq("user_id", user_id)
+        .eq("type", "onboarding_timezone")
+        .limit(1)
+        .execute()
+    )
+    tz = tz_res.data[0]["description"] if tz_res.data else "America/New_York"
+
     try:
         existing = supabase.table("schedule").select("user_id").eq("user_id", user_id).limit(1).execute()
+        schedule_data = {
+            "timezone": tz,
+            "motivation_enabled": True,
+            "motivation_frequency": "Once a day",
+            "motivation_window_start": "08:00",
+            "motivation_window_end": "21:00",
+            "motivation_styles": ["Hype & pump-up"],
+        }
+        if checkin_time:
+            schedule_data["checkin_time"] = checkin_time
+
         if not existing.data:
-            schedule_row = {
-                "user_id": user_id,
-                "checkin_time": "08:00",
-                "timezone": "America/New_York",
-                "motivation_enabled": motivation_prefs.get("motivation_enabled", True),
-                "motivation_frequency": motivation_prefs.get("frequency", "Once a day"),
-                "motivation_window_start": motivation_prefs.get("window_start", "09:00"),
-                "motivation_window_end": motivation_prefs.get("window_end", "20:00"),
-                "motivation_styles": ["Hype & pump-up"],
-            }
-            supabase.table("schedule").insert(schedule_row).execute()
-            logger.info(f"[onboarding] schedule row created for user={user_id} prefs={motivation_prefs}")
+            schedule_data["user_id"] = user_id
+            if "checkin_time" not in schedule_data:
+                schedule_data["checkin_time"] = "08:00"
+            supabase.table("schedule").insert(schedule_data).execute()
+            logger.info(f"[onboarding] schedule row created for user={user_id} tz={tz} checkin={checkin_time}")
         else:
-            # Update motivation fields on existing row
-            supabase.table("schedule").update({
-                "motivation_enabled": motivation_prefs.get("motivation_enabled", True),
-                "motivation_frequency": motivation_prefs.get("frequency", "Once a day"),
-                "motivation_window_start": motivation_prefs.get("window_start", "09:00"),
-                "motivation_window_end": motivation_prefs.get("window_end", "20:00"),
-            }).eq("user_id", user_id).execute()
+            supabase.table("schedule").update(schedule_data).eq("user_id", user_id).execute()
     except Exception:
         logger.exception(f"[onboarding] failed to create/update schedule row for user={user_id}")
+
+    # Clean up onboarding context rows
+    for ctx_type in ("onboarding_timezone", "onboarding_goals", "onboarding_checkin"):
+        try:
+            supabase.table("user_context").delete().eq("user_id", user_id).eq("type", ctx_type).execute()
+        except Exception:
+            pass
 
     wrap_up = await _coach_voice(
         coach_prompt,
         "All goals are scheduled. Tell the user you will be texting them on schedule and you are ready to get to work. One message, in character."
     )
     return wrap_up
-
-
-# ---------------------------------------------------------------------------
-# Step 4 — motivation preferences
-# ---------------------------------------------------------------------------
-
-async def _handle_step_4(
-    user_id: str,
-    to_number: str,
-    coach_prompt: str,
-    message_body: str,
-    supabase,
-) -> str:
-    """Collect motivation preferences via a 3-sub-state mini state machine."""
-    ctx_res = (
-        supabase.table("user_context")
-        .select("id, description, metadata")
-        .eq("user_id", user_id)
-        .eq("type", "motivation_setup")
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    if not ctx_res.data:
-        # Safety net: missing context — go straight to finalize with defaults
-        logger.warning(f"[onboarding] step 4 missing motivation_setup context for user={user_id}, finalizing with defaults")
-        return await _finalize_onboarding(user_id, to_number, coach_prompt, {}, supabase)
-
-    ctx_id = ctx_res.data[0]["id"]
-    sub_state = ctx_res.data[0]["description"]
-    metadata = ctx_res.data[0].get("metadata") or {}
-
-    if sub_state == "awaiting_opt_in":
-        answered_yes = await _parse_yes_no(message_body)
-        if answered_yes is None:
-            return await _coach_voice(coach_prompt, "The user didn't give a clear yes or no. Ask again if they want daily motivation messages from you. One sentence.")
-        if not answered_yes:
-            supabase.table("user_context").delete().eq("id", ctx_id).execute()
-            return await _finalize_onboarding(user_id, to_number, coach_prompt, {"motivation_enabled": False}, supabase)
-        supabase.table("user_context").update({"description": "awaiting_frequency"}).eq("id", ctx_id).execute()
-        return await _coach_voice(coach_prompt, "Ask how many times a day they want motivation messages — once, twice, or three times. Stay in character. One sentence.")
-
-    if sub_state == "awaiting_frequency":
-        frequency = await _parse_motivation_frequency(message_body)
-        if not frequency:
-            return await _coach_voice(coach_prompt, "The user wasn't clear. Ask again: once, twice, or three times a day for motivation messages? One sentence.")
-        supabase.table("user_context").update({
-            "description": "awaiting_window",
-            "metadata": {**metadata, "frequency": frequency},
-        }).eq("id", ctx_id).execute()
-        return await _coach_voice(coach_prompt, "Ask what hours they want to receive motivation — for example 8am to 9pm. One sentence, stay in character.")
-
-    if sub_state == "awaiting_window":
-        window = await _parse_motivation_window(message_body)
-        if not window:
-            return await _coach_voice(coach_prompt, "Ask them again for a start time and end time for motivation messages. Give the example 8am to 9pm. One sentence.")
-        supabase.table("user_context").update({
-            "description": "confirming_window",
-            "metadata": {
-                **metadata,
-                "window_start": window["start"],
-                "window_end": window["end"],
-                "window_start_display": window["start_display"],
-                "window_end_display": window["end_display"],
-            },
-        }).eq("id", ctx_id).execute()
-        start_d = window["start_display"] or window["start"]
-        end_d = window["end_display"] or window["end"]
-        return await _coach_voice(
-            coach_prompt,
-            f"Confirm with the user: you'll send motivation messages from {start_d} to {end_d}. Ask if that window is correct. Yes or no. One sentence."
-        )
-
-    if sub_state == "confirming_window":
-        answered_yes = await _parse_yes_no(message_body)
-        start_d = metadata.get("window_start_display") or metadata.get("window_start", "")
-        end_d = metadata.get("window_end_display") or metadata.get("window_end", "")
-        if answered_yes is None:
-            return await _coach_voice(coach_prompt, f"Ask again: is {start_d} to {end_d} the right window for motivation messages? Yes or no. One sentence.")
-        if not answered_yes:
-            supabase.table("user_context").update({
-                "description": "awaiting_window",
-                "metadata": {k: v for k, v in metadata.items() if k not in ("window_start", "window_end", "window_start_display", "window_end_display")},
-            }).eq("id", ctx_id).execute()
-            return await _coach_voice(coach_prompt, "Ask them again for the time window for motivation messages. Give the example 8am to 9pm. One sentence, in character.")
-        supabase.table("user_context").delete().eq("id", ctx_id).execute()
-        prefs = {
-            "motivation_enabled": True,
-            "frequency": metadata.get("frequency", "Once a day"),
-            "window_start": metadata["window_start"],
-            "window_end": metadata["window_end"],
-        }
-        return await _finalize_onboarding(user_id, to_number, coach_prompt, prefs, supabase)
-
-    # Unknown sub-state — finalize with defaults
-    logger.warning(f"[onboarding] step 4 unknown sub_state='{sub_state}' for user={user_id}, finalizing")
-    supabase.table("user_context").delete().eq("id", ctx_id).execute()
-    return await _finalize_onboarding(user_id, to_number, coach_prompt, {}, supabase)
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +410,6 @@ async def handle_onboarding(
     # ── Step 0 — unknown number: create user ──────────────────────────────
     if user_data is None:
         try:
-            # Create an auth.users entry first (required by FK constraint)
             placeholder_email = f"sms_{from_number.lstrip('+').replace(' ', '')}@stackd.app"
             auth_res = supabase.auth.admin.create_user({
                 "phone": from_number,
@@ -560,7 +419,6 @@ async def handle_onboarding(
             })
             auth_uid = auth_res.user.id
             now_iso = datetime.now(timezone.utc).isoformat()
-            # Insert public users row with matching id — record TCPA consent at first contact
             supabase.table("users").insert({
                 "id": auth_uid,
                 "email": placeholder_email,
@@ -573,7 +431,6 @@ async def handle_onboarding(
         except Exception:
             logger.exception(f"[onboarding] failed to create user for {from_number}")
             return "Something went wrong. Try again in a moment."
-        # CTIA-required disclosure must be first message sent
         ctia = (
             "stackd: You're signing up for daily AI coaching texts. ~20-30 msgs/month. "
             "Msg&Data rates may apply. Reply STOP to cancel anytime, HELP for info. "
@@ -594,198 +451,266 @@ async def handle_onboarding(
 
     # ── Step 1 — persona still being set up ───────────────────────────────
     if step == 1:
-        # Check if background task already finished (coach_settings exists)
         coach_res = supabase.table("coach_settings").select("coach_name").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
         if not coach_res.data:
             return "Still setting things up, give me one more second."
-        # Persona is ready — the background task already sent intro and set step=2
-        # If user texted during the window, just nudge them
-        return "Almost there — I just sent you your coach's first message."
+        return "Almost there — check your messages."
 
-    # ── Step 2 — goals text received ──────────────────────────────────────
+    # ── Step 2 — city received ────────────────────────────────────────────
     if step == 2:
-        coach_res_2 = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
-        coach_prompt_2 = coach_res_2.data[0].get("generated_system_prompt", "") if coach_res_2.data else ""
+        coach_res = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
+        coach_prompt = coach_res.data[0].get("generated_system_prompt", "") if coach_res.data else ""
 
-        goal_names = await _extract_goals_smart(message_body)
-        if goal_names is None:
-            clarify = await _coach_voice(
-                coach_prompt_2,
-                "The user's goals were unclear or stated as outcomes, not activities. Ask them to name the specific activities they plan to do, not the results they want. Be direct. One message."
-            )
-            return clarify
+        city = message_body.strip()
+        tz = await _city_to_timezone(city)
 
-        inserted_goals = []
-        for goal_name in goal_names:
-            try:
-                res = supabase.table("goals").insert({
-                    "user_id": user_id,
-                    "activity": goal_name,
-                    "category": "fitness",
-                    "days": [],
-                }).execute()
-                if res.data:
-                    inserted_goals.append({"id": res.data[0]["id"], "name": goal_name})
-            except Exception:
-                logger.exception(f"[onboarding] failed to insert goal '{goal_name}' for user={user_id}")
-
-        if not inserted_goals:
-            return "Couldn't save your goals. Try again."
-
-        # Store loop state in user_context using remaining list (order-independent, partial-reply safe)
-        remaining_ids = [g["id"] for g in inserted_goals]
-        context_payload = json.dumps({"goals": inserted_goals, "remaining": remaining_ids})
-        supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "onboarding_goals").execute()
+        supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "onboarding_timezone").execute()
         supabase.table("user_context").insert({
             "user_id": user_id,
-            "type": "onboarding_goals",
-            "description": context_payload,
+            "type": "onboarding_timezone",
+            "description": tz,
             "expires_at": _expires_24h(),
         }).execute()
 
         supabase.table("users").update({"onboarding_step": 3}).eq("id", user_id).execute()
-        logger.info(f"[onboarding] user={user_id} goals saved: {[g['name'] for g in inserted_goals]}, step→3")
+        logger.info(f"[onboarding] user={user_id} city='{city}' tz='{tz}' step→3")
 
+        # Acknowledge city + ask for goals+schedule
+        opener = await _coach_voice(
+            coach_prompt,
+            "Acknowledge their city in one short sentence in your voice."
+        )
+        goals_ask = f"{opener} Now tell me what you want to work on and when. Like gym Monday Wednesday Friday at 6pm or reading every night at 9pm."
+        return goals_ask
+
+    # ── Step 3 — goals+schedule received ──────────────────────────────────
+    if step == 3:
         coach_res = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
         coach_prompt = coach_res.data[0].get("generated_system_prompt", "") if coach_res.data else ""
-        goal_names = [g["name"] for g in inserted_goals]
-        goals_list = ", ".join(f"'{n}'" for n in goal_names)
-        prompt_msg = await _coach_voice(
-            coach_prompt,
-            f"Goals are saved: {goals_list}. Ask the user which days and what time they plan to do each one. Write it as a single flowing sentence with no lists, no colons, no line breaks."
+
+        # Check retry count
+        ctx_res = (
+            supabase.table("user_context")
+            .select("id, metadata")
+            .eq("user_id", user_id)
+            .eq("type", "onboarding_goals")
+            .limit(1)
+            .execute()
         )
-        return prompt_msg
+        retry_count = (ctx_res.data[0].get("metadata") or {}).get("retry_count", 0) if ctx_res.data else 0
+        ctx_id = ctx_res.data[0]["id"] if ctx_res.data else None
 
-    # ── Step 3 — schedule loop (partial-reply safe, days + time per goal) ─
-    if step == 3:
-        try:
-            ctx_res = (
-                supabase.table("user_context")
-                .select("description")
-                .eq("user_id", user_id)
-                .eq("type", "onboarding_goals")
-                .limit(1)
-                .execute()
-            )
-            if not ctx_res.data:
+        extracted = await _extract_goals_and_schedule(message_body)
+
+        if extracted is None:
+            # Extraction failed
+            if retry_count >= 2:
+                # Force advance to step 4 with whatever is in DB
+                logger.warning(f"[onboarding] user={user_id} step 3 max retries hit, advancing to step 4")
+                if ctx_id:
+                    supabase.table("user_context").delete().eq("id", ctx_id).execute()
                 supabase.table("users").update({"onboarding_step": 4}).eq("id", user_id).execute()
-                supabase.table("user_context").insert({"user_id": user_id, "type": "motivation_setup", "description": "awaiting_opt_in", "metadata": {}, "expires_at": _expires_24h()}).execute()
-                coach_res_fb = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
-                coach_prompt_fb = coach_res_fb.data[0].get("generated_system_prompt", "") if coach_res_fb.data else ""
-                return await _coach_voice(coach_prompt_fb, "Ask the user if they want daily motivation messages from you. Yes or no. One sentence.")
+                return await _build_recap(user_id, coach_prompt, supabase)
 
-            ctx = json.loads(ctx_res.data[0]["description"])
-            goals = ctx["goals"]
-            # Copy to avoid mutating the JSON-derived list in place across retries
-            remaining_ids: list = list(ctx.get("remaining", [g["id"] for g in goals]))
-
-            coach_res = supabase.table("coach_settings").select("coach_name, generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
-            coach_row = coach_res.data[0] if coach_res.data else {}
-            coach_prompt = coach_row.get("generated_system_prompt", "")
-
-            remaining_goals = [g for g in goals if g["id"] in remaining_ids]
-            remaining_names = [g["name"] for g in remaining_goals]
-
-            if not remaining_goals:
-                logger.warning(f"[onboarding] user={user_id} step=3 with empty remaining; advancing to step 4")
-                supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "onboarding_goals").execute()
-                supabase.table("users").update({"onboarding_step": 4}).eq("id", user_id).execute()
-                supabase.table("user_context").insert({"user_id": user_id, "type": "motivation_setup", "description": "awaiting_opt_in", "metadata": {}, "expires_at": _expires_24h()}).execute()
-                coach_res_rg = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
-                coach_prompt_rg = coach_res_rg.data[0].get("generated_system_prompt", "") if coach_res_rg.data else ""
-                return await _coach_voice(coach_prompt_rg, "Ask the user if they want daily motivation messages from you. Yes or no. One sentence.")
-
-            if len(remaining_goals) == 1:
-                mentioned_names = remaining_names
+            new_retry = retry_count + 1
+            if ctx_id:
+                supabase.table("user_context").update({"metadata": {"retry_count": new_retry}}).eq("id", ctx_id).execute()
             else:
-                mentioned_names = await _goals_mentioned_gemini(message_body, remaining_names)
-                # If no specific goal named, user likely means all remaining — try all
-                if not mentioned_names:
-                    mentioned_names = remaining_names
-
-            scheduled_any = False
-            for goal in remaining_goals:
-                if goal["name"] not in mentioned_names:
-                    continue
-                days = await _parse_days_smart(message_body, goal["name"])
-                if not days:
-                    continue
-                # Store days as lowercase full names to match scheduler's lookup
-                days_lower = [d.lower() for d in days]
-                time_str = await _extract_time_gemini(message_body, goal["name"])
-                update_payload: dict = {"days": days_lower}
-                if time_str:
-                    # Normalize to HH:MM 24h for scheduler's activity notification job
-                    normalized_time = _normalize_time(time_str)
-                    if normalized_time:
-                        # Build per-day schedule in format scheduler expects: {DayAbbr: {times: [HH:MM]}}
-                        day_abbrs = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-                        full_to_abbr = {d.lower(): day_abbrs[i] for i, d in enumerate(
-                            ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
-                        )}
-                        times_map = {full_to_abbr[d]: {"times": [normalized_time]} for d in days_lower if d in full_to_abbr}
-                        update_payload["times_per_day"] = times_map
-                try:
-                    supabase.table("goals").update(update_payload).eq("id", goal["id"]).execute()
-                except Exception:
-                    logger.exception(f"[onboarding] failed to update goal '{goal['name']}' for user={user_id}")
-                    continue
-                logger.info(f"[onboarding] user={user_id} goal '{goal['name']}' days={days} time={time_str}")
-                if goal["id"] in remaining_ids:
-                    remaining_ids.remove(goal["id"])
-                scheduled_any = True
-
-            if not scheduled_any:
-                clarify = await _coach_voice(
-                    coach_prompt,
-                    f"Ask the user which days and what time they want to do '{remaining_goals[0]['name']}'. Direct, one sentence."
-                )
-                return clarify
-
-            if not remaining_ids:
-                logger.info(f"[onboarding] user={user_id} all goals scheduled, step→4 (motivation prefs)")
-                try:
-                    supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "onboarding_goals").execute()
-                except Exception:
-                    logger.exception(f"[onboarding] failed to delete onboarding_goals context for user={user_id}")
-                supabase.table("users").update({"onboarding_step": 4}).eq("id", user_id).execute()
                 supabase.table("user_context").insert({
                     "user_id": user_id,
-                    "type": "motivation_setup",
-                    "description": "awaiting_opt_in",
-                    "metadata": {},
+                    "type": "onboarding_goals",
+                    "description": "retry",
+                    "metadata": {"retry_count": new_retry},
                     "expires_at": _expires_24h(),
                 }).execute()
-                opt_in_msg = await _coach_voice(
-                    coach_prompt,
-                    "Ask the user if they want daily motivation messages from you. Keep it in character. Yes or no question. One sentence."
-                )
-                return opt_in_msg
 
-            # Some goals still unscheduled — ask about all remaining at once
-            ctx["remaining"] = remaining_ids
-            supabase.table("user_context").update({
-                "description": json.dumps(ctx),
-                "expires_at": _expires_24h(),
-            }).eq("user_id", user_id).eq("type", "onboarding_goals").execute()
-
-            still_remaining = [g for g in goals if g["id"] in remaining_ids]
-            still_names = ", ".join(f"'{g['name']}'" for g in still_remaining)
-            next_prompt = await _coach_voice(
+            return await _coach_voice(
                 coach_prompt,
-                f"Ask the user which days and what time they plan to do each of these: {still_names}. Write it as a single flowing sentence with no lists, no colons, no line breaks."
+                "The user's reply was unclear. Ask them to list their activities and schedule again. Give the example: gym Monday Wednesday Friday at 6pm or reading every night at 9pm. One sentence in your voice."
             )
-            return next_prompt
 
-        except Exception:
-            logger.exception(f"[onboarding] step 3 unhandled exception for user={user_id}")
-            return "Something went wrong scheduling your goals. Reply with the days and times and I'll try again."
+        # Insert goals into DB
+        for item in extracted:
+            try:
+                # Check if this goal already exists for this user
+                existing = (
+                    supabase.table("goals")
+                    .select("id")
+                    .eq("user_id", user_id)
+                    .ilike("activity", item["activity"])
+                    .limit(1)
+                    .execute()
+                )
+                payload = _build_goal_payload(item)
+                if existing.data:
+                    supabase.table("goals").update(payload).eq("id", existing.data[0]["id"]).execute()
+                else:
+                    supabase.table("goals").insert({
+                        "user_id": user_id,
+                        "activity": item["activity"],
+                        "category": "fitness",
+                        "days": payload.get("days", []),
+                        "times_per_day": payload.get("times_per_day"),
+                    }).execute()
+                logger.info(f"[onboarding] user={user_id} goal '{item['activity']}' days={item['days']} time={item['time']}")
+            except Exception:
+                logger.exception(f"[onboarding] failed to insert/update goal '{item['activity']}' for user={user_id}")
 
-    # ── Step 4 — motivation preferences ──────────────────────────────────
+        # Clean up retry context
+        if ctx_id:
+            supabase.table("user_context").delete().eq("id", ctx_id).execute()
+
+        supabase.table("users").update({"onboarding_step": 4}).eq("id", user_id).execute()
+        logger.info(f"[onboarding] user={user_id} goals inserted, step→4")
+
+        return await _build_recap(user_id, coach_prompt, supabase)
+
+    # ── Step 4 — recap confirmation ───────────────────────────────────────
     if step == 4:
-        coach_res_4 = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
-        coach_prompt_4 = coach_res_4.data[0].get("generated_system_prompt", "") if coach_res_4.data else ""
-        return await _handle_step_4(user_id, from_number, coach_prompt_4, message_body, supabase)
+        coach_res = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
+        coach_prompt = coach_res.data[0].get("generated_system_prompt", "") if coach_res.data else ""
 
-    # ── Step 5+ — fall through to normal pipeline ─────────────────────────
+        ctx_res = (
+            supabase.table("user_context")
+            .select("id, metadata")
+            .eq("user_id", user_id)
+            .eq("type", "onboarding_recap")
+            .limit(1)
+            .execute()
+        )
+        correction_count = (ctx_res.data[0].get("metadata") or {}).get("correction_count", 0) if ctx_res.data else 0
+        ctx_id = ctx_res.data[0]["id"] if ctx_res.data else None
+
+        answered_yes = await _parse_yes_no(message_body)
+
+        def _advance_to_checkin():
+            if ctx_id:
+                supabase.table("user_context").delete().eq("id", ctx_id).execute()
+            supabase.table("users").update({"onboarding_step": 5}).eq("id", user_id).execute()
+
+        if answered_yes is True or correction_count >= 1:
+            _advance_to_checkin()
+            logger.info(f"[onboarding] user={user_id} recap confirmed, step→5")
+            checkin_q = await _coach_voice(
+                coach_prompt,
+                "Ask the user if they want a daily check-in text from you. If yes, ask what time. Give an example like 8am or 9pm. Tell them to reply no to skip. No em dashes, no bullets, no markdown. One SMS."
+            )
+            return checkin_q
+
+        # Try to parse as a correction
+        corrected = await _extract_goals_and_schedule(message_body)
+        if corrected:
+            existing_goals = (
+                supabase.table("goals")
+                .select("id, activity, days")
+                .eq("user_id", user_id)
+                .execute()
+                .data or []
+            )
+            for item in corrected:
+                # Find matching goal by name (case-insensitive partial match)
+                matched = None
+                for g in existing_goals:
+                    if (item["activity"].lower() in g["activity"].lower() or
+                            g["activity"].lower() in item["activity"].lower()):
+                        matched = g
+                        break
+                if not matched:
+                    continue
+
+                update_payload: dict = {}
+                if item["days"]:
+                    days_lower = [d.lower() for d in item["days"]]
+                    update_payload["days"] = days_lower
+                    if item["time"]:
+                        times_map = {
+                            _FULL_TO_ABBR[d]: {"times": [item["time"]]}
+                            for d in days_lower if d in _FULL_TO_ABBR
+                        }
+                        update_payload["times_per_day"] = times_map
+                elif item["time"]:
+                    # Only time given — update times for already-stored days
+                    existing_days = matched.get("days") or []
+                    if existing_days:
+                        times_map = {
+                            _FULL_TO_ABBR[d]: {"times": [item["time"]]}
+                            for d in existing_days if d in _FULL_TO_ABBR
+                        }
+                        update_payload["times_per_day"] = times_map
+
+                if update_payload:
+                    supabase.table("goals").update(update_payload).eq("id", matched["id"]).execute()
+                    logger.info(f"[onboarding] step 4 correction applied to goal='{matched['activity']}' payload={update_payload}")
+
+        # Store correction count and re-send recap
+        new_count = correction_count + 1
+        if ctx_id:
+            supabase.table("user_context").update({"metadata": {"correction_count": new_count}}).eq("id", ctx_id).execute()
+        else:
+            supabase.table("user_context").insert({
+                "user_id": user_id,
+                "type": "onboarding_recap",
+                "description": "awaiting_confirmation",
+                "metadata": {"correction_count": new_count},
+                "expires_at": _expires_24h(),
+            }).execute()
+
+        return await _build_recap(user_id, coach_prompt, supabase)
+
+    # ── Step 5 — check-in preference ──────────────────────────────────────
+    if step == 5:
+        coach_res = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
+        coach_prompt = coach_res.data[0].get("generated_system_prompt", "") if coach_res.data else ""
+
+        ctx_res = (
+            supabase.table("user_context")
+            .select("id, description")
+            .eq("user_id", user_id)
+            .eq("type", "onboarding_checkin")
+            .limit(1)
+            .execute()
+        )
+        awaiting_time = ctx_res.data and ctx_res.data[0].get("description") == "awaiting_time"
+        ctx_id = ctx_res.data[0]["id"] if ctx_res.data else None
+
+        if awaiting_time:
+            # Second pass — try to get the time from their reply
+            time_raw = _normalize_time(message_body.strip())
+            if ctx_id:
+                supabase.table("user_context").delete().eq("id", ctx_id).execute()
+            checkin_time = time_raw or "08:00"
+            return await _finalize_onboarding(user_id, from_number, coach_prompt, checkin_time, supabase)
+
+        answered_yes = await _parse_yes_no(message_body)
+
+        if answered_yes is False:
+            # No check-in
+            if ctx_id:
+                supabase.table("user_context").delete().eq("id", ctx_id).execute()
+            return await _finalize_onboarding(user_id, from_number, coach_prompt, None, supabase)
+
+        # Yes — try to parse a time from the same message
+        time_raw = _normalize_time(message_body.strip())
+        if time_raw:
+            if ctx_id:
+                supabase.table("user_context").delete().eq("id", ctx_id).execute()
+            return await _finalize_onboarding(user_id, from_number, coach_prompt, time_raw, supabase)
+
+        # Yes but no time — ask once more
+        if ctx_id:
+            supabase.table("user_context").update({"description": "awaiting_time"}).eq("id", ctx_id).execute()
+        else:
+            supabase.table("user_context").insert({
+                "user_id": user_id,
+                "type": "onboarding_checkin",
+                "description": "awaiting_time",
+                "expires_at": _expires_24h(),
+            }).execute()
+
+        return await _coach_voice(
+            coach_prompt,
+            "They want a check-in but did not give a time. Ask what time they want the daily check-in. Give an example like 8am or 9pm. One sentence in your voice."
+        )
+
+    # ── Step 6+ — fall through to normal pipeline ─────────────────────────
     return None

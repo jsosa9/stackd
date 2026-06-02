@@ -23,7 +23,7 @@ from supabase import create_client
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-USER_ID = "852b9695-f40b-4925-953a-19e6cd56c191"
+USER_ID = "30f9256d-d099-4f74-8d4a-548b5bb2a550"
 
 supabase = create_client(
     os.getenv("SUPABASE_URL"),
