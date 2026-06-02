@@ -143,9 +143,9 @@
       "detail": "safely routed away from goal creation"
     },
     {
-      "label": "'I want to reflect on where I could improve' \u2192 GENERAL",
+      "label": "'I want to reflect on where I could improve' \u2192 JOURNAL",
       "expected": "NOT CREATE_GOAL",
-      "got": "GENERAL",
+      "got": "JOURNAL",
       "pass": true,
       "detail": "safely routed away from goal creation"
     },

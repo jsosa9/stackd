@@ -69,7 +69,7 @@ supabase = create_client(
 _PERSONALITY_SWAP_RE = re.compile(r'^[A-Z]{4}[0-9]{4}$')
 
 VALID_CATEGORIES = (
-    "GOAL", "CREATE_GOAL", "DELETE_GOAL",
+    "GOAL", "CREATE_GOAL", "MODIFY_GOAL", "DELETE_GOAL",
     "STATS_QUERY", "MOTIVATION_REQUEST",
     "NUTRITION", "TASK", "JOURNAL", "BET", "GENERAL",
 )
@@ -82,6 +82,9 @@ _CLASSIFIER_SYSTEM = (
     "Examples that ARE CREATE_GOAL: 'I want to add a goal', 'can we track my running', 'add journaling as a habit to track', 'track this for me'. "
     "Examples that are NOT CREATE_GOAL (classify as GENERAL): 'I want to start meditating', 'I want to begin reading', 'I want to write about my day', 'I want to reflect on things', 'maybe I should meditate', 'I want to do yoga', 'I want to wake up at 5am'. "
     "The phrase 'I want to [verb] [activity]' without track/add/register is NEVER CREATE_GOAL — it is GENERAL.\n"
+    "MODIFY_GOAL: user wants to change an existing goal — update its days, time, or activity name. "
+    "REQUIRED: must reference an existing habit they already track and use words like 'change', 'update', 'move', 'switch', 'edit'. "
+    "Examples: 'change my gym to Monday and Wednesday', 'update reading to 9pm', 'move my run to Tuesdays', 'switch gym to MWF at 7am'\n"
     "DELETE_GOAL: user wants to remove, delete, or stop tracking a goal. "
     "Examples: 'remove my running goal', 'delete my gym habit', 'I want to stop tracking meditation'\n"
     "GOAL: user is checking in on or reporting progress on an existing goal. "
@@ -337,6 +340,11 @@ async def handle_goal(user_id: str, message_body: str, user_timezone: str) -> st
 
 async def handle_create_goal(user_id: str, message_body: str, user_timezone: str = "") -> str:
     """Extract goal details from the user's message and insert a new goal into the DB."""
+    _all_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    _day_abbrs = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    _full_to_abbr = {d.lower(): _day_abbrs[i] for i, d in enumerate(
+        ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    )}
     try:
         model = genai.GenerativeModel(model_name="gemini-2.5-flash-lite")
         response = model.generate_content(
@@ -345,9 +353,12 @@ async def handle_create_goal(user_id: str, message_body: str, user_timezone: str
             f"Return JSON with these keys:\n"
             f"activity: short action phrase for the goal (e.g. journal, run, meditate, read)\n"
             f"category: one of fitness, health, learning, personal, productivity\n"
-            f"days: array of day names they want to do it — if not mentioned assume all 7\n\n"
+            f"days: array of full day names they want to do it — empty array [] if not mentioned. "
+            f"'every day', 'daily', 'every night' = all 7 days.\n"
+            f"time: clock time string like '6:00 PM' or '18:00', or null if not mentioned.\n\n"
             f"Example: {{\"activity\": \"journal\", \"category\": \"personal\", "
-            f"\"days\": [\"Monday\",\"Tuesday\",\"Wednesday\",\"Thursday\",\"Friday\",\"Saturday\",\"Sunday\"]}}\n\n"
+            f"\"days\": [\"Monday\",\"Tuesday\",\"Wednesday\",\"Thursday\",\"Friday\",\"Saturday\",\"Sunday\"], "
+            f"\"time\": \"21:00\"}}\n\n"
             f"Return only valid JSON, nothing else."
         )
         try:
@@ -355,24 +366,42 @@ async def handle_create_goal(user_id: str, message_body: str, user_timezone: str
         except (json.JSONDecodeError, ValueError):
             logger.warning(f"[create_goal] bad JSON from Gemini for user={user_id}: {response.text[:100]}")
             data = {}
+
         activity = data.get("activity") or "new goal"
         category = data.get("category") or "personal"
-        all_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-        days = data.get("days") or all_days
+        days = data.get("days") or []
         if not isinstance(days, list):
-            days = all_days
+            days = []
+        days = [d for d in days if d in _all_days]
+
+        # Build times_per_day if time given
+        time_raw = data.get("time")
+        times_per_day: dict = {}
+        time_display: str | None = None
+        if time_raw and days:
+            from services.onboarding import _normalize_time
+            normalized = _normalize_time(str(time_raw))
+            if normalized:
+                days_lower = [d.lower() for d in days]
+                times_per_day = {_full_to_abbr[d]: {"times": [normalized]} for d in days_lower if d in _full_to_abbr}
+                h, m = map(int, normalized.split(":"))
+                ampm = "am" if h < 12 else "pm"
+                h12 = h % 12 or 12
+                time_display = f"{h12}:{m:02d}{ampm}" if m else f"{h12}{ampm}"
 
         supabase.table("goals").insert({
             "user_id": user_id,
             "activity": activity,
             "category": category,
-            "days": days,
-            "times_per_day": {},
+            "days": [d.lower() for d in days],
+            "times_per_day": times_per_day,
         }).execute()
 
-        day_str = "every day" if len(days) >= 7 else ", ".join(days)
-        logger.info(f"[create_goal] created goal='{activity}' ({day_str}) for user={user_id}")
-        return f"New goal created: {activity} ({day_str})"
+        day_str = "every day" if len(days) >= 7 else (", ".join(days) if days else "no days set")
+        time_str = f" at {time_display}" if time_display else ""
+        result = f"Goal added: {activity} {day_str}{time_str}"
+        logger.info(f"[create_goal] {result} for user={user_id}")
+        return result
     except Exception:
         logger.exception(f"[create_goal] failed for user={user_id}")
         return ""
@@ -601,6 +630,94 @@ async def handle_delete_goal(user_id: str, message_body: str, user_timezone: str
         return ""
 
 
+async def handle_modify_goal(user_id: str, message_body: str, user_timezone: str = "") -> str:
+    """Parse the user's update request and apply changes to the matching goal in DB."""
+    _all_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    _day_abbrs = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    _full_to_abbr = {d.lower(): _day_abbrs[i] for i, d in enumerate(
+        ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    )}
+    try:
+        goals_res = supabase.table("goals").select("id, activity, days, times_per_day").eq("user_id", user_id).execute()
+        goals = goals_res.data or []
+        if not goals:
+            return "user has no goals to modify"
+
+        goals_context = ", ".join(f"{g['id']}:{g['activity']}" for g in goals)
+        model = genai.GenerativeModel(model_name="gemini-2.5-flash-lite")
+        response = model.generate_content(
+            f"The user wants to modify an existing goal.\n"
+            f"Their goals: {goals_context}\n"
+            f"Message: \"{message_body}\"\n\n"
+            f"Return JSON with these keys:\n"
+            f"goal_id: the id of the goal to modify\n"
+            f"activity: the activity name (for confirmation)\n"
+            f"days: new array of full day names, or null to keep existing\n"
+            f"  'every day', 'daily', 'every night' = all 7 days\n"
+            f"time: new clock time string like '18:00', or null to keep existing\n\n"
+            f"Return only valid JSON, nothing else."
+        )
+        try:
+            data = json.loads(_strip_json_fences(response.text))
+        except (json.JSONDecodeError, ValueError):
+            logger.warning(f"[modify_goal] bad JSON from Gemini for user={user_id}: {response.text[:100]}")
+            return "could not understand which goal to update"
+
+        goal_id = data.get("goal_id", "")
+        activity = data.get("activity", "that goal")
+        valid_ids = {g["id"] for g in goals}
+
+        if goal_id not in valid_ids:
+            return "could not identify which goal to update"
+
+        update_payload: dict = {}
+        new_days = data.get("days")
+        new_time = data.get("time")
+
+        if new_days is not None:
+            if not isinstance(new_days, list):
+                new_days = []
+            new_days = [d for d in new_days if d in _all_days]
+            days_lower = [d.lower() for d in new_days]
+            update_payload["days"] = days_lower
+
+        # Rebuild times_per_day if either days or time changed
+        existing_goal = next((g for g in goals if g["id"] == goal_id), {})
+        working_days = update_payload.get("days") or existing_goal.get("days") or []
+
+        if new_time is not None:
+            from services.onboarding import _normalize_time
+            normalized = _normalize_time(str(new_time))
+            if normalized and working_days:
+                times_map = {_full_to_abbr[d]: {"times": [normalized]} for d in working_days if d in _full_to_abbr}
+                update_payload["times_per_day"] = times_map
+        elif "days" in update_payload and working_days:
+            # Days changed but time not — preserve existing time across new days
+            existing_tpd = existing_goal.get("times_per_day") or {}
+            existing_time = None
+            for dv in existing_tpd.values():
+                t = (dv.get("times") or [None])[0]
+                if t:
+                    existing_time = t
+                    break
+            if existing_time:
+                times_map = {_full_to_abbr[d]: {"times": [existing_time]} for d in working_days if d in _full_to_abbr}
+                update_payload["times_per_day"] = times_map
+
+        if not update_payload:
+            return "no changes detected"
+
+        supabase.table("goals").update(update_payload).eq("id", goal_id).eq("user_id", user_id).execute()
+
+        day_str = ("every day" if len(working_days) >= 7 else ", ".join(d.capitalize() for d in working_days)) if working_days else "days unchanged"
+        logger.info(f"[modify_goal] updated goal='{activity}' for user={user_id} payload={update_payload}")
+        return f"Goal updated: {activity} is now {day_str}"
+
+    except Exception:
+        logger.exception(f"[modify_goal] failed for user={user_id}")
+        return ""
+
+
 async def handle_stats_query(user_id: str, message_body: str, user_timezone: str = "") -> str:
     """Fetch goals and streaks and return a summary for the voice generator."""
     try:
@@ -650,6 +767,7 @@ async def handle_motivation_request(user_id: str, message_body: str, user_timezo
 
 _HANDLER_MAP = {
     "CREATE_GOAL":        handle_create_goal,
+    "MODIFY_GOAL":        handle_modify_goal,
     "DELETE_GOAL":        handle_delete_goal,
     "STATS_QUERY":        handle_stats_query,
     "MOTIVATION_REQUEST": handle_motivation_request,

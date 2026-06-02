@@ -4,8 +4,8 @@ onboarding.py — SMS-driven coach onboarding state machine.
 State transitions (stored in users.onboarding_step):
   None/unknown → 0  : auto-create user, ask for coach name
   0 → 1             : start persona setup in background, ack
-  1 → 2             : (background) persona ready — sends intro + goals preview + city ask
-  2 → 3             : city received → store timezone → ask for goals+schedule
+  1 → 2             : (background) persona ready — sends intro + goals preview + timezone ask
+  2 → 3             : timezone received → store → ask for goals+schedule
   3 → 4             : extract goals+schedule → insert → send recap
   4 → 5             : recap confirmed → ask check-in preference
   5 → 6             : check-in preference received → finalize
@@ -39,6 +39,31 @@ _DAY_ABBRS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 _FULL_TO_ABBR = {d.lower(): _DAY_ABBRS[i] for i, d in enumerate(
     ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 )}
+
+_TZ_MAP = {
+    "eastern": "America/New_York",
+    "est": "America/New_York",
+    "edt": "America/New_York",
+    "central": "America/Chicago",
+    "cst": "America/Chicago",
+    "cdt": "America/Chicago",
+    "mountain": "America/Denver",
+    "mst": "America/Denver",
+    "mdt": "America/Denver",
+    "pacific": "America/Los_Angeles",
+    "pst": "America/Los_Angeles",
+    "pdt": "America/Los_Angeles",
+    "alaska": "America/Anchorage",
+    "akst": "America/Anchorage",
+    "hawaii": "Pacific/Honolulu",
+    "hst": "Pacific/Honolulu",
+    "gmt": "Europe/London",
+    "utc": "UTC",
+    "cet": "Europe/Paris",
+    "ist": "Asia/Kolkata",
+    "jst": "Asia/Tokyo",
+    "aest": "Australia/Sydney",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -125,20 +150,24 @@ async def _parse_yes_no(message_body: str) -> bool | None:
         return None
 
 
-async def _city_to_timezone(city: str) -> str:
-    """Convert a city name to an IANA timezone string. Returns America/New_York on failure."""
+async def _parse_timezone(raw: str) -> str:
+    """Convert a timezone name/abbreviation to an IANA string. Lookup table first, Gemini fallback."""
+    key = raw.strip().lower()
+    if key in _TZ_MAP:
+        return _TZ_MAP[key]
+    # Gemini fallback for anything not in the table (e.g. "Berlin time", "Mexico City")
     prompt = (
-        f"What is the IANA timezone string for the city: {city}? "
+        f"What is the IANA timezone string for: {raw}? "
         f"Return only the timezone string, e.g. America/Los_Angeles or America/New_York. No explanation."
     )
     try:
         import pytz
         model = genai.GenerativeModel("gemini-2.5-flash-lite")
-        raw = model.generate_content(prompt).text.strip().strip('"').strip("'")
-        pytz.timezone(raw)  # validate
-        return raw
+        result = model.generate_content(prompt).text.strip().strip('"').strip("'")
+        pytz.timezone(result)  # validate
+        return result
     except Exception:
-        logger.warning(f"[onboarding] could not resolve timezone for city='{city}', defaulting to America/New_York")
+        logger.warning(f"[onboarding] could not resolve timezone for '{raw}', defaulting to America/New_York")
         return "America/New_York"
 
 
@@ -199,8 +228,12 @@ async def _coach_voice(system_prompt: str, instruction: str) -> str:
         return instruction
 
 
-async def _build_recap(user_id: str, coach_prompt: str, supabase) -> str:
-    """Build and return an in-character recap confirmation message from current goals in DB."""
+async def _build_recap(user_id: str, coach_prompt: str, supabase, pending_items: list[dict] | None = None) -> str:
+    """Build and return an in-character recap confirmation message from current goals in DB.
+
+    pending_items: extracted [{activity, days, time}] from the last parse pass, used to show
+    times that were given but couldn't be stored (e.g. time with no days yet).
+    """
     goals = (
         supabase.table("goals")
         .select("activity, days, times_per_day")
@@ -214,6 +247,13 @@ async def _build_recap(user_id: str, coach_prompt: str, supabase) -> str:
             coach_prompt,
             "Something went wrong saving goals. Ask the user to list their habits and schedule again. One sentence."
         )
+
+    # Build a map of pending times for goals where time was given but days were not
+    pending_times: dict[str, str] = {}
+    if pending_items:
+        for item in pending_items:
+            if item.get("time") and not item.get("days"):
+                pending_times[item["activity"].lower()] = item["time"]
 
     lines = []
     for g in goals:
@@ -230,6 +270,10 @@ async def _build_recap(user_id: str, coach_prompt: str, supabase) -> str:
                 time_str = t
                 break
 
+        # Overlay pending time if DB has no time yet
+        if not time_str:
+            time_str = pending_times.get(activity.lower())
+
         if time_str:
             lines.append(f"{activity} {days_str} at {_time_to_display(time_str)}")
         else:
@@ -238,6 +282,7 @@ async def _build_recap(user_id: str, coach_prompt: str, supabase) -> str:
     goals_summary = ". ".join(lines)
     recap_prompt = (
         f"Confirm with the user what you have. Here is exactly what to confirm: {goals_summary}. "
+        "Goals with no days set won't send reminders until days are added but they can say yes now and fix it from the app. "
         "Ask them to say yes if that is right or tell you what to fix. "
         "No em dashes, no bullets, no markdown. Stay in your voice. One SMS."
     )
@@ -296,12 +341,13 @@ async def setup_and_intro(user_id: str, to_number: str, name: str, supabase) -> 
         goals_msg = f"{goals_opener} Something like gym Monday Wednesday Friday at 6pm or reading every night at 9pm."
         _send_sms(to_number, goals_msg)
 
-        # Message 3: city ask — in character
-        city_msg = await _coach_voice(
+        # Message 3: timezone ask — in character opener + hardcoded options
+        tz_opener = await _coach_voice(
             system_prompt,
-            "Ask what city they are in so you know their time zone. One short sentence in your voice."
+            "Ask what time zone they are in so you know when to text them. One short sentence in your voice. Do not list examples."
         )
-        _send_sms(to_number, city_msg)
+        tz_msg = f"{tz_opener} Like Eastern, Central, Mountain, or Pacific."
+        _send_sms(to_number, tz_msg)
 
         supabase.table("users").update({"onboarding_step": 2}).eq("id", user_id).execute()
         logger.info(f"[onboarding] user={user_id} advanced to step 2")
@@ -461,8 +507,8 @@ async def handle_onboarding(
         coach_res = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
         coach_prompt = coach_res.data[0].get("generated_system_prompt", "") if coach_res.data else ""
 
-        city = message_body.strip()
-        tz = await _city_to_timezone(city)
+        tz_input = message_body.strip()
+        tz = await _parse_timezone(tz_input)
 
         supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "onboarding_timezone").execute()
         supabase.table("user_context").insert({
@@ -473,15 +519,15 @@ async def handle_onboarding(
         }).execute()
 
         supabase.table("users").update({"onboarding_step": 3}).eq("id", user_id).execute()
-        logger.info(f"[onboarding] user={user_id} city='{city}' tz='{tz}' step→3")
+        logger.info(f"[onboarding] user={user_id} tz_input='{tz_input}' tz='{tz}' step→3")
 
-        # Acknowledge city + ask for goals+schedule
-        opener = await _coach_voice(
+        # Ask for goals+schedule
+        goals_ask = await _coach_voice(
             coach_prompt,
-            "Acknowledge their city in one short sentence in your voice."
+            "Tell the user you have their timezone and now ask what habits they want to work on and when. One sentence in your voice."
         )
-        goals_ask = f"{opener} Now tell me what you want to work on and when. Like gym Monday Wednesday Friday at 6pm or reading every night at 9pm."
-        return goals_ask
+        goals_msg = f"{goals_ask} Like gym Monday Wednesday Friday at 6pm or reading every night at 9pm."
+        return goals_msg
 
     # ── Step 3 — goals+schedule received ──────────────────────────────────
     if step == 3:
@@ -510,7 +556,7 @@ async def handle_onboarding(
                 if ctx_id:
                     supabase.table("user_context").delete().eq("id", ctx_id).execute()
                 supabase.table("users").update({"onboarding_step": 4}).eq("id", user_id).execute()
-                return await _build_recap(user_id, coach_prompt, supabase)
+                return await _build_recap(user_id, coach_prompt, supabase, pending_items=None)
 
             new_retry = retry_count + 1
             if ctx_id:
@@ -563,7 +609,7 @@ async def handle_onboarding(
         supabase.table("users").update({"onboarding_step": 4}).eq("id", user_id).execute()
         logger.info(f"[onboarding] user={user_id} goals inserted, step→4")
 
-        return await _build_recap(user_id, coach_prompt, supabase)
+        return await _build_recap(user_id, coach_prompt, supabase, pending_items=extracted)
 
     # ── Step 4 — recap confirmation ───────────────────────────────────────
     if step == 4:
