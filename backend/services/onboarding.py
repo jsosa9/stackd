@@ -212,6 +212,60 @@ async def _extract_goals_and_schedule(message_body: str) -> list[dict] | None:
         return None
 
 
+async def _extract_correction(message_body: str, existing_goals: list[dict]) -> list[dict] | None:
+    """
+    Like _extract_goals_and_schedule but passes existing goal names to Gemini so it can
+    map user synonyms (e.g. 'gym') back to the real stored goal name (e.g. 'weight lifting').
+    Returns [{activity (exact existing name), days, time}] or None on failure.
+    """
+    goal_names = [g["activity"] for g in existing_goals]
+    if not goal_names:
+        return None
+    names_str = json.dumps(goal_names)
+    all_days_str = str(_ALL_DAYS)
+    prompt = (
+        f"The user is correcting their goal schedule. Map each thing they mention to the closest goal from this list: {names_str}.\n"
+        f"Message: \"{message_body}\"\n\n"
+        f"Rules:\n"
+        f"- activity: MUST be the exact string from the list above that best matches what the user is talking about.\n"
+        f"  For example, 'gym', 'hit the gym', 'lifting' all map to 'weight lifting' if that's in the list.\n"
+        f"  'meditate', 'meditation' map to 'meditating'. Only include goals actually mentioned.\n"
+        f"- days: array of day names from {all_days_str}. Empty array [] if not mentioned.\n"
+        f"  'every day', 'daily', 'every night', 'nightly', 'everyday' = all 7 days.\n"
+        f"- time: clock time string like '6:00 PM' or '18:00', or null if not mentioned.\n\n"
+        f"Return only a JSON array. No markdown. Example:\n"
+        f'[{{"activity": "weight lifting", "days": ["Monday","Tuesday","Thursday"], "time": "18:00"}}]'
+    )
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash-lite")
+        raw = model.generate_content(prompt).text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        parsed = json.loads(raw)
+        if not isinstance(parsed, list) or not parsed:
+            return None
+        result = []
+        valid_names_lower = {g["activity"].lower(): g["activity"] for g in existing_goals}
+        for item in parsed:
+            activity_raw = (item.get("activity") or "").strip()
+            # Accept only activities that match an existing goal (case-insensitive)
+            activity = valid_names_lower.get(activity_raw.lower())
+            if not activity:
+                # Try partial match as fallback
+                for name_lower, name in valid_names_lower.items():
+                    if activity_raw.lower() in name_lower or name_lower in activity_raw.lower():
+                        activity = name
+                        break
+            if not activity:
+                continue
+            days = [d for d in (item.get("days") or []) if d in _ALL_DAYS]
+            time_str = item.get("time")
+            normalized = _normalize_time(time_str) if time_str else None
+            result.append({"activity": activity, "days": days, "time": normalized})
+        return result if result else None
+    except Exception:
+        logger.exception("[onboarding] correction extraction failed")
+        return None
+
+
 async def _coach_voice(system_prompt: str, instruction: str) -> str:
     """Generate a short in-character coach message for the given instruction."""
     try:
@@ -225,7 +279,7 @@ async def _coach_voice(system_prompt: str, instruction: str) -> str:
         return model.generate_content(instruction).text.strip()
     except Exception:
         logger.exception("[onboarding] coach voice generation failed")
-        return instruction
+        return "Still here. Go ahead."
 
 
 async def _build_recap(user_id: str, coach_prompt: str, supabase, pending_items: list[dict] | None = None) -> str:
@@ -655,24 +709,19 @@ async def handle_onboarding(
             )
             return checkin_q
 
-        # Try to parse as a correction
-        corrected = await _extract_goals_and_schedule(message_body)
+        # Try to parse as a correction — use the dedicated extractor that maps to existing goal names
+        existing_goals = (
+            supabase.table("goals")
+            .select("id, activity, days")
+            .eq("user_id", user_id)
+            .execute()
+            .data or []
+        )
+        corrected = await _extract_correction(message_body, existing_goals)
         if corrected:
-            existing_goals = (
-                supabase.table("goals")
-                .select("id, activity, days")
-                .eq("user_id", user_id)
-                .execute()
-                .data or []
-            )
+            goal_by_name = {g["activity"].lower(): g for g in existing_goals}
             for item in corrected:
-                # Find matching goal by name (case-insensitive partial match)
-                matched = None
-                for g in existing_goals:
-                    if (item["activity"].lower() in g["activity"].lower() or
-                            g["activity"].lower() in item["activity"].lower()):
-                        matched = g
-                        break
+                matched = goal_by_name.get(item["activity"].lower())
                 if not matched:
                     continue
 
