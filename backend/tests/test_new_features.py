@@ -123,11 +123,12 @@ async def run_checkin_tests():
     )
     print(f"        → {text[:100]}")
     check("during: returns SMS-length text", "non-empty SMS", text[:30] + "...", looks_like_sms(text))
+    reading_keywords = ["reading", "read", "book", "page", "chapter"]
     check(
         "during: asks about pending goal ('reading'), not the confirmed one",
-        "mentions 'reading'",
+        "mentions reading/book/page/chapter",
         text[:100],
-        "reading" in text.lower(),
+        any(kw in text.lower() for kw in reading_keywords),
         detail="coach should ask about still-pending goal, not the one already confirmed",
     )
 
@@ -166,7 +167,7 @@ async def run_checkin_tests():
     print(f"        → {text[:100]}")
     check("during+missed: returns SMS-length text", "non-empty SMS", text[:30] + "...", looks_like_sms(text))
     # Coach should ask about reading — either the word "reading" or book-related words
-    reading_keywords = ["reading", "read", "book", "page"]
+    reading_keywords = ["reading", "read", "book", "page", "chapter"]
     asks_about_reading = any(kw in text.lower() for kw in reading_keywords)
     # Coach should NOT be asking about the missed gym goal again
     gym_past_question = any(

@@ -143,9 +143,9 @@
       "detail": "safely routed away from goal creation"
     },
     {
-      "label": "'I want to reflect on where I could improve' \u2192 JOURNAL",
+      "label": "'I want to reflect on where I could improve' \u2192 GENERAL",
       "expected": "NOT CREATE_GOAL",
-      "got": "JOURNAL",
+      "got": "GENERAL",
       "pass": true,
       "detail": "safely routed away from goal creation"
     },
@@ -158,8 +158,8 @@
     },
     {
       "label": "Goal count unchanged after casual messages",
-      "expected": "0 goals",
-      "got": "0 goals",
+      "expected": "3 goals",
+      "got": "3 goals",
       "pass": true,
       "detail": ""
     },
@@ -192,8 +192,8 @@
       "detail": ""
     },
     {
-      "label": "Persona block stripped before system_instruction injection",
-      "expected": "_strip_markdown(persona_manager.get_system_prompt(persona))",
+      "label": "Voice reply uses get_persona_examples_block (no duplicate identity header)",
+      "expected": "get_persona_examples_block in message_router",
       "got": "found",
       "pass": true,
       "detail": ""

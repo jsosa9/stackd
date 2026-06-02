@@ -641,6 +641,11 @@ Return only the system prompt text. No preamble, no explanation, no labels. Just
 
             supabase.table("coach_settings").update({"is_active": False}).eq("user_id", user_id).execute()
 
+            sounds_like_val = (
+                coach.get("custom_coach_sounds_like")
+                or coach.get("sounds_like")
+                or coach.get("coach_name", "")
+            )
             supabase.table("coach_settings").insert({
                 "user_id": user_id,
                 "generated_system_prompt": generated_prompt,
@@ -649,6 +654,8 @@ Return only the system prompt text. No preamble, no explanation, no labels. Just
                 "version": current_version + 1,
                 "is_active": True,
                 "coach_name": coach.get("coach_name", "Coach"),
+                "sounds_like": sounds_like_val,
+                "coach_setup_type": coach.get("coach_setup_type", "celebrity"),
             }).execute()
         except Exception as e:
             logger.warning(f"Failed to save system prompt to coach_settings: {str(e)}")
@@ -659,6 +666,32 @@ Return only the system prompt text. No preamble, no explanation, no labels. Just
     except Exception as e:
         logger.exception(f"Failed to generate system prompt for user {user_id}")
         raise HTTPException(status_code=500, detail="Failed to generate coach personality")
+
+
+async def get_persona_examples_block(coach: dict) -> str:
+    """
+    Return a formatted block of few-shot examples for the coach's persona.
+    Tries sounds_like first, then coach_name, then personality_id.
+    Returns empty string if persona not found or has no examples.
+    """
+    from routes.personas import persona_manager
+    try:
+        persona = None
+        sounds_like = coach.get("sounds_like") or coach.get("coach_name", "")
+        if sounds_like:
+            persona = await persona_manager.fetch_persona_by_name(sounds_like)
+        if persona is None:
+            personality_id = coach.get("personality_id", "")
+            if personality_id:
+                persona = await persona_manager.fetch_persona(personality_id)
+        if persona and persona.few_shot_examples:
+            return "\n\n".join(
+                f"User: {ex['user']}\n{persona.name}: {ex['assistant']}"
+                for ex in persona.few_shot_examples
+            )
+    except Exception:
+        logger.exception("[persona_examples] failed to fetch persona examples")
+    return ""
 
 
 async def generate_motivation_text(user_id: str) -> str:
@@ -673,13 +706,19 @@ async def generate_motivation_text(user_id: str) -> str:
     logger.info(f"Generating motivation text for user {user_id}")
 
     # Fetch the saved system prompt from the active personality
-    coach_res = supabase.table("coach_settings").select("generated_system_prompt, coach_name").eq("user_id", user_id).eq("is_active", True).execute()
+    coach_res = supabase.table("coach_settings").select("*").eq("user_id", user_id).eq("is_active", True).execute()
     if not coach_res.data:
-        coach_res = supabase.table("coach_settings").select("generated_system_prompt, coach_name").eq("user_id", user_id).order("created_at", desc=True).limit(1).execute()
-    if not coach_res.data or not coach_res.data[0].get("generated_system_prompt"):
+        coach_res = supabase.table("coach_settings").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(1).execute()
+    coach_row = coach_res.data[0] if coach_res.data else {}
+    if not coach_row.get("generated_system_prompt"):
         system_prompt = await build_coach_personality(user_id)
     else:
-        system_prompt = coach_res.data[0]["generated_system_prompt"]
+        system_prompt = coach_row["generated_system_prompt"]
+
+    # Inject persona few-shot examples (only new examples if not already embedded)
+    examples_block = await get_persona_examples_block(coach_row)
+    if examples_block and examples_block not in system_prompt:
+        system_prompt = f"{system_prompt}\n\nReinforcement examples:\n{examples_block}"
 
     # Inject live personality settings as a fallback/reinforcement layer
     personality_context = await get_user_personality_context(user_id)
@@ -808,13 +847,18 @@ async def generate_contextual_checkin(
     notification_states: list of {"activity": str, "state": str, "scheduled_time": str}
     user_context_today: list of {"type": str, "description": str}
     """
-    coach_res = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).execute()
+    coach_res = supabase.table("coach_settings").select("*").eq("user_id", user_id).eq("is_active", True).execute()
     if not coach_res.data:
-        coach_res = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).order("created_at", desc=True).limit(1).execute()
-    if not coach_res.data or not coach_res.data[0].get("generated_system_prompt"):
+        coach_res = supabase.table("coach_settings").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(1).execute()
+    coach_row = coach_res.data[0] if coach_res.data else {}
+    if not coach_row.get("generated_system_prompt"):
         system_prompt = await build_coach_personality(user_id)
     else:
-        system_prompt = coach_res.data[0]["generated_system_prompt"]
+        system_prompt = coach_row["generated_system_prompt"]
+
+    examples_block = await get_persona_examples_block(coach_row)
+    if examples_block and examples_block not in system_prompt:
+        system_prompt = f"{system_prompt}\n\nReinforcement examples:\n{examples_block}"
 
     personality_context = await get_user_personality_context(user_id)
     if personality_context:
@@ -922,13 +966,18 @@ async def generate_nightly_summary(
     missed_goals: list of {"activity": str} for goals with MISSED notification state
     user_context_today: list of {"type": str, "description": str} from user_context
     """
-    coach_res = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).execute()
+    coach_res = supabase.table("coach_settings").select("*").eq("user_id", user_id).eq("is_active", True).execute()
     if not coach_res.data:
-        coach_res = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).order("created_at", desc=True).limit(1).execute()
-    if not coach_res.data or not coach_res.data[0].get("generated_system_prompt"):
+        coach_res = supabase.table("coach_settings").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(1).execute()
+    coach_row = coach_res.data[0] if coach_res.data else {}
+    if not coach_row.get("generated_system_prompt"):
         system_prompt = await build_coach_personality(user_id)
     else:
-        system_prompt = coach_res.data[0]["generated_system_prompt"]
+        system_prompt = coach_row["generated_system_prompt"]
+
+    examples_block = await get_persona_examples_block(coach_row)
+    if examples_block and examples_block not in system_prompt:
+        system_prompt = f"{system_prompt}\n\nReinforcement examples:\n{examples_block}"
 
     personality_context = await get_user_personality_context(user_id)
     if personality_context:

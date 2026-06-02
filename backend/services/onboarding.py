@@ -282,7 +282,7 @@ async def _build_recap(user_id: str, coach_prompt: str, supabase, pending_items:
     goals_summary = ". ".join(lines)
     recap_prompt = (
         f"Confirm with the user what you have. Here is exactly what to confirm: {goals_summary}. "
-        "Goals with no days set won't send reminders until days are added but they can say yes now and fix it from the app. "
+        "Goals with no days set won't send reminders until days are added but they can say yes now and just tell you later to update it. "
         "Ask them to say yes if that is right or tell you what to fix. "
         "No em dashes, no bullets, no markdown. Stay in your voice. One SMS."
     )
@@ -428,6 +428,18 @@ async def _finalize_onboarding(
             supabase.table("user_context").delete().eq("user_id", user_id).eq("type", ctx_type).execute()
         except Exception:
             pass
+
+    # Rebuild system prompt with user's actual goals/schedule in background
+    async def _rebuild():
+        try:
+            from routes.ai import build_coach_personality
+            await build_coach_personality(user_id)
+            logger.info(f"[onboarding] system prompt rebuilt with user goals for user={user_id}")
+        except Exception:
+            logger.warning(f"[onboarding] system prompt rebuild failed for user={user_id}", exc_info=True)
+
+    import asyncio
+    asyncio.create_task(_rebuild())
 
     wrap_up = await _coach_voice(
         coach_prompt,

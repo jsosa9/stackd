@@ -240,10 +240,10 @@ async def run_strip_markdown_test():
         router_src = f.read()
 
     check(
-        "Persona block stripped before system_instruction injection",
-        "_strip_markdown(persona_manager.get_system_prompt(persona))",
-        "found" if "_strip_markdown(persona_manager.get_system_prompt(persona))" in router_src else "NOT FOUND",
-        "_strip_markdown(persona_manager.get_system_prompt(persona))" in router_src,
+        "Voice reply uses get_persona_examples_block (no duplicate identity header)",
+        "get_persona_examples_block in message_router",
+        "found" if "get_persona_examples_block" in router_src else "NOT FOUND",
+        "get_persona_examples_block" in router_src,
     )
 
 

@@ -28,7 +28,7 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from supabase import create_client
 from routes.personas import persona_manager
-from routes.ai import HUMAN_BEHAVIOR_RULES
+from routes.ai import HUMAN_BEHAVIOR_RULES, CONVICTION_RULES
 
 load_dotenv()
 
@@ -796,25 +796,12 @@ async def _generate_voice_reply(
     """
     system_prompt = coach.get("generated_system_prompt") or ""
 
-    # Augment system_prompt with few-shot examples from the personas table
+    # Augment system_prompt with few-shot examples (without duplicating the identity header)
     try:
-        persona = None
-        sounds_like = coach.get("sounds_like")
-        personality_id = coach.get("personality_id")
-
-        if sounds_like:
-            persona = await persona_manager.fetch_persona_by_name(sounds_like)
-            if persona:
-                logger.debug(f"[voice] loaded persona by sounds_like='{sounds_like}'")
-
-        if persona is None and personality_id:
-            persona = await persona_manager.fetch_persona(personality_id)
-            if persona:
-                logger.debug(f"[voice] loaded persona by personality_id='{personality_id}'")
-
-        if persona:
-            persona_block = _strip_markdown(persona_manager.get_system_prompt(persona))
-            system_prompt = system_prompt + "\n\n" + persona_block
+        from routes.ai import get_persona_examples_block
+        examples_block = await get_persona_examples_block(coach)
+        if examples_block and examples_block not in system_prompt:
+            system_prompt = system_prompt + "\n\nReinforcement examples:\n" + examples_block
     except Exception:
         logger.exception("[voice] persona augmentation failed — continuing with base prompt")
 
@@ -914,7 +901,7 @@ async def _generate_voice_reply(
         f"Recent user context (mood, wins, struggles):\n{user_context_block}\n\n"
         f"The user sent: {message_body}\n"
         f"Actions taken: {execution_result or 'none'}\n"
-        "Reply as the coach. SMS only. Stay in character. Do not use any emojis. "
+        "Reply as the coach. SMS only. Stay in character. "
         "Only reference activities that exist in the user's goal list above. "
         "Never assume the user is committing to an activity or will do something — ask first. "
         "Never tell the user you will remind them of something or that an activity starts now unless it was confirmed. "
@@ -924,7 +911,7 @@ async def _generate_voice_reply(
 
     model = genai.GenerativeModel(
         model_name="gemini-2.5-flash-lite",
-        system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
+        system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}\n\n{CONVICTION_RULES}",
     )
     chat     = model.start_chat(history=gemini_history)
     response = chat.send_message(user_prompt)
