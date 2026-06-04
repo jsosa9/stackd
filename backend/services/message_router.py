@@ -321,6 +321,21 @@ async def handle_goal(user_id: str, message_body: str, user_timezone: str) -> st
                 }, on_conflict="user_id,goal_id,completed_date").execute()
             except Exception:
                 logger.exception(f"[goal] goal_completions upsert failed for user={user_id} goal={goal_id}")
+            # Mark any NOTIFIED activity notification for this goal today as CONFIRMED
+            try:
+                goal_activity = next((g["activity"] for g in goals if g["id"] == goal_id), None)
+                if goal_activity:
+                    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+                    supabase.table("activity_notifications") \
+                        .update({"state": "CONFIRMED"}) \
+                        .eq("user_id", user_id) \
+                        .eq("activity", goal_activity) \
+                        .eq("state", "NOTIFIED") \
+                        .gte("scheduled_time", today_start) \
+                        .execute()
+                    logger.info(f"[goal] activity_notification confirmed for '{goal_activity}' user={user_id}")
+            except Exception:
+                logger.exception(f"[goal] failed to confirm activity_notification for user={user_id}")
 
         ctx_type = "win" if completed else "struggle"
         supabase.table("user_context").insert({
@@ -589,14 +604,29 @@ async def handle_bet(user_id: str, message_body: str, user_timezone: str) -> str
 
 
 async def handle_delete_goal(user_id: str, message_body: str, user_timezone: str = "") -> str:
-    """Identify which goal the user wants to delete and remove it from the DB."""
+    """Two-step delete: first call stores pending_delete and asks to confirm; second call does the delete."""
     try:
-        goals_res = (
-            supabase.table("goals")
-            .select("id, activity")
-            .eq("user_id", user_id)
-            .execute()
-        )
+        # Check for a pending delete awaiting confirmation
+        pending_res = supabase.table("user_context").select("id, description").eq("user_id", user_id).eq("type", "pending_delete").limit(1).execute()
+        if pending_res.data:
+            pending = pending_res.data[0]
+            ctx_id = pending["id"]
+            stored = pending.get("description", "")  # "goal_id:activity"
+            # Parse yes/no from message
+            lowered = message_body.strip().lower()
+            is_yes = any(w in lowered for w in ["yes", "yeah", "yep", "yup", "do it", "delete it", "confirm"])
+            is_no  = any(w in lowered for w in ["no", "nope", "cancel", "keep", "nevermind", "never mind", "stop"])
+            supabase.table("user_context").delete().eq("id", ctx_id).execute()
+            if is_yes and ":" in stored:
+                goal_id, activity = stored.split(":", 1)
+                supabase.table("goals").delete().eq("id", goal_id).eq("user_id", user_id).execute()
+                logger.info(f"[delete_goal] confirmed delete goal='{activity}' for user={user_id}")
+                return f"Goal deleted: {activity}"
+            else:
+                return f"Got it, keeping {stored.split(':', 1)[-1] if ':' in stored else 'it'}"
+
+        # First call — identify the goal and ask for confirmation
+        goals_res = supabase.table("goals").select("id, activity").eq("user_id", user_id).execute()
         goals = goals_res.data or []
         if not goals:
             return "no goals to delete"
@@ -621,9 +651,16 @@ async def handle_delete_goal(user_id: str, message_body: str, user_timezone: str
         if goal_id not in valid_ids:
             return "could not identify which goal to delete"
 
-        supabase.table("goals").delete().eq("id", goal_id).eq("user_id", user_id).execute()
-        logger.info(f"[delete_goal] deleted goal='{activity}' ({goal_id}) for user={user_id}")
-        return f"Goal deleted: {activity}"
+        # Store pending delete and request confirmation
+        supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "pending_delete").execute()
+        supabase.table("user_context").insert({
+            "user_id": user_id,
+            "type": "pending_delete",
+            "description": f"{goal_id}:{activity}",
+            "expires_at": _hours_from_now(2),
+        }).execute()
+        logger.info(f"[delete_goal] awaiting confirmation to delete '{activity}' for user={user_id}")
+        return f"confirm_delete:{activity}"
 
     except Exception:
         logger.exception(f"[delete_goal] failed for user={user_id}")
@@ -740,17 +777,17 @@ async def handle_stats_query(user_id: str, message_body: str, user_timezone: str
         )
         streak_map = {s["goal_id"]: s for s in (streaks_res.data or [])}
 
-        lines = []
+        parts = []
         for g in goals:
             s = streak_map.get(g["id"], {})
             current = s.get("current_streak", 0)
             longest = s.get("longest_streak", 0)
-            lines.append(
-                f"- {g['activity']} ({g.get('category', '')}): "
-                f"{current} day streak (best: {longest})"
-            )
+            streak_note = f"{current}-day streak" if current > 0 else "0-day streak"
+            if longest > 0 and longest != current:
+                streak_note += f" (best: {longest})"
+            parts.append(f"{g['activity']}: {streak_note}")
 
-        summary = "User's goals and streaks:\n" + "\n".join(lines)
+        summary = "User stats — " + ". ".join(parts) + "."
         logger.info(f"[stats_query] fetched {len(goals)} goals for user={user_id}")
         return summary
 
@@ -952,8 +989,12 @@ async def process_inbound_sms(
     if coach is None:
         return await _handle_no_persona(user_id, message_body)
 
-    # 2. Classify
-    category = await classify(message_body)
+    # 2. Classify — but short-circuit if a pending_delete is awaiting confirmation
+    pending_del = supabase.table("user_context").select("id").eq("user_id", user_id).eq("type", "pending_delete").limit(1).execute()
+    if pending_del.data:
+        category = "DELETE_GOAL"
+    else:
+        category = await classify(message_body)
     logger.info(f"[pipeline] user={user_id} category={category}")
 
     # 3. Route to handler

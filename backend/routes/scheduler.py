@@ -150,8 +150,8 @@ def send_scheduled_checkins() -> None:
         try:
             tz = pytz.timezone(tz_name)
         except Exception:
-            logger.warning(f"Unknown timezone '{tz_name}' for user {user_id}")
-            continue
+            logger.warning(f"Unknown timezone '{tz_name}' for user {user_id} — defaulting to America/New_York")
+            tz = pytz.timezone("America/New_York")
 
         local_now = datetime.now(tz)
 
@@ -165,10 +165,16 @@ def send_scheduled_checkins() -> None:
         if local_now.hour != checkin_hour or local_now.minute != checkin_minute:
             continue
 
+        today_str_pre = local_now.strftime("%Y-%m-%d")
+        already_sent = supabase.table("user_context").select("id").eq("user_id", user_id).eq("type", "checkin_sent").eq("description", today_str_pre).execute()
+        if already_sent.data:
+            continue
+        supabase.table("user_context").insert({"user_id": user_id, "type": "checkin_sent", "description": today_str_pre}).execute()
+
         day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
         today_lower = day_names[local_now.weekday()]
         today_abbr  = local_now.strftime("%a")   # "Mon", "Tue", …
-        today_str   = local_now.strftime("%Y-%m-%d")
+        today_str   = today_str_pre
         checkin_minutes = checkin_hour * 60 + checkin_minute
 
         # ── Goals scheduled today ────────────────────────────────────────────
@@ -298,8 +304,8 @@ def send_motivation_messages() -> None:
         try:
             tz = pytz.timezone(tz_name)
         except Exception:
-            logger.warning(f"Unknown timezone '{tz_name}' for user {user_id}")
-            continue
+            logger.warning(f"Unknown timezone '{tz_name}' for user {user_id} — defaulting to America/New_York")
+            tz = pytz.timezone("America/New_York")
 
         local_now = datetime.now(tz)
 
@@ -343,14 +349,17 @@ def send_motivation_messages() -> None:
             if (now_utc - last_sent).total_seconds() < min_gap_hours * 3600:
                 continue  # Too soon to send another
 
-        # Skip motivation if user has no goals scheduled today (rest day)
+        # Skip motivation if user has no goals at all, or has goals but none today (rest day)
         today_name = local_now.strftime("%A").lower()
         goals_res = supabase.table("goals").select("days").eq("user_id", user_id).execute()
+        if not goals_res.data:
+            logger.info(f"[motivation] user={user_id} has no goals — skipping")
+            continue
         active_today = any(
             today_name in (g.get("days") or [])
-            for g in (goals_res.data or [])
+            for g in goals_res.data
         )
-        if not active_today and goals_res.data:
+        if not active_today:
             logger.info(f"[motivation] rest day for user={user_id} ({today_name}), skipping")
             continue
 
@@ -1666,8 +1675,8 @@ def send_nightly_summaries() -> None:
         try:
             tz = pytz.timezone(tz_name)
         except Exception:
-            scheduler_logger.warning(f"[nightly] unknown tz '{tz_name}' for user={user_id}")
-            continue
+            scheduler_logger.warning(f"[nightly] unknown tz '{tz_name}' for user={user_id} — defaulting to America/New_York")
+            tz = pytz.timezone("America/New_York")
 
         local_now = datetime.now(tz)
         if local_now.hour != SUMMARY_HOUR or local_now.minute != 0:

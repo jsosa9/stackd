@@ -186,9 +186,12 @@ async def _extract_goals_and_schedule(message_body: str) -> list[dict] | None:
         f"- days: array of day names from {all_days_str}. Empty array [] if not mentioned.\n"
         f"  'every day', 'daily', 'every night', 'nightly' = all 7 days.\n"
         f"  'weekdays' = Monday through Friday.\n"
-        f"- time: clock time string like '6:00 PM' or '18:00', or null if not mentioned.\n\n"
+        f"- time: clock time string like '6:00 PM' or '18:00', or null if not mentioned.\n"
+        f"- IMPORTANT: if the SAME activity has DIFFERENT times on different days, create a SEPARATE entry for each time group.\n"
+        f"  Example: 'gym at 6pm Monday Tuesday and 8pm Thursday' → two entries with the same activity name.\n\n"
         f"Return only a JSON array. No markdown. Example:\n"
-        f'[{{"activity": "gym", "days": ["Monday","Wednesday","Friday"], "time": "18:00"}}, '
+        f'[{{"activity": "gym", "days": ["Monday","Tuesday"], "time": "18:00"}}, '
+        f'{{"activity": "gym", "days": ["Thursday"], "time": "20:00"}}, '
         f'{{"activity": "reading", "days": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"], "time": null}}]'
     )
     try:
@@ -232,9 +235,12 @@ async def _extract_correction(message_body: str, existing_goals: list[dict]) -> 
         f"  'meditate', 'meditation' map to 'meditating'. Only include goals actually mentioned.\n"
         f"- days: array of day names from {all_days_str}. Empty array [] if not mentioned.\n"
         f"  'every day', 'daily', 'every night', 'nightly', 'everyday' = all 7 days.\n"
-        f"- time: clock time string like '6:00 PM' or '18:00', or null if not mentioned.\n\n"
+        f"- time: clock time string like '6:00 PM' or '18:00', or null if not mentioned.\n"
+        f"- IMPORTANT: if the SAME activity has DIFFERENT times on different days, create a SEPARATE entry for each time group.\n"
+        f"  Example: 'gym at 6pm Monday Tuesday and 8pm Thursday' → two entries both with activity='weight lifting'.\n\n"
         f"Return only a JSON array. No markdown. Example:\n"
-        f'[{{"activity": "weight lifting", "days": ["Monday","Tuesday","Thursday"], "time": "18:00"}}]'
+        f'[{{"activity": "weight lifting", "days": ["Monday","Tuesday"], "time": "18:00"}}, '
+        f'{{"activity": "weight lifting", "days": ["Thursday"], "time": "20:00"}}]'
     )
     try:
         model = genai.GenerativeModel("gemini-2.5-flash-lite")
@@ -317,21 +323,35 @@ async def _build_recap(user_id: str, coach_prompt: str, supabase, pending_items:
 
         days_str = " ".join(d.capitalize() for d in days) if days else "no days set"
 
-        time_str = None
-        for day_data in times_per_day.values():
-            t = (day_data.get("times") or [None])[0]
-            if t:
-                time_str = t
-                break
+        # Collect distinct times across days
+        all_time_vals: set[str] = set()
+        if times_per_day:
+            for day_data in times_per_day.values():
+                t = (day_data.get("times") or [None])[0]
+                if t:
+                    all_time_vals.add(t)
 
-        # Overlay pending time if DB has no time yet
-        if not time_str:
-            time_str = pending_times.get(activity.lower())
-
-        if time_str:
-            lines.append(f"{activity} {days_str} at {_time_to_display(time_str)}")
+        if not all_time_vals:
+            # No stored times — use pending overlay
+            pending_t = pending_times.get(activity.lower())
+            if pending_t:
+                lines.append(f"{activity} {days_str} at {_time_to_display(pending_t)}")
+            else:
+                lines.append(f"{activity} {days_str}")
+        elif len(all_time_vals) == 1:
+            lines.append(f"{activity} {days_str} at {_time_to_display(list(all_time_vals)[0])}")
         else:
-            lines.append(f"{activity} {days_str}")
+            # Different times per day — group days by time
+            time_to_abbrs: dict[str, list[str]] = {}
+            for abbr, day_data in times_per_day.items():
+                t = (day_data.get("times") or [None])[0]
+                if t:
+                    time_to_abbrs.setdefault(t, []).append(abbr)
+            parts = []
+            for t, abbrs in time_to_abbrs.items():
+                ordered = [a for a in _DAY_ABBRS if a in abbrs]
+                parts.append(f"{' '.join(ordered)} at {_time_to_display(t)}")
+            lines.append(f"{activity} {', '.join(parts)}")
 
     goals_summary = ". ".join(lines)
     recap_prompt = (
@@ -387,12 +407,16 @@ async def setup_and_intro(user_id: str, to_number: str, name: str, supabase) -> 
         )
         _send_sms(to_number, intro)
 
-        # Message 2: goals preview — persona voice opener + hardcoded example
+        # Message 2: goals preview — persona voice opener + in-character example
         goals_opener = await _coach_voice(
             system_prompt,
             "Ask what habits the user wants to track and when. One short sentence in your voice. Do not include an example."
         )
-        goals_msg = f"{goals_opener} Something like gym Monday Wednesday Friday at 6pm or reading every night at 9pm."
+        goals_example = await _coach_voice(
+            system_prompt,
+            "Give one short example of a habit with a schedule, like 'gym Monday Wednesday Friday at 6pm'. One phrase only, no intro sentence. Stay in your voice."
+        )
+        goals_msg = f"{goals_opener} Like {goals_example}"
         _send_sms(to_number, goals_msg)
 
         # Message 3: timezone ask — in character opener + hardcoded options
@@ -495,9 +519,25 @@ async def _finalize_onboarding(
     import asyncio
     asyncio.create_task(_rebuild())
 
+    # Build wrap-up with actual goal context so it's concrete, not generic
+    try:
+        goals_data = supabase.table("goals").select("activity, days").eq("user_id", user_id).execute().data or []
+        goals_summary = ", ".join(g["activity"] for g in goals_data) if goals_data else "your goals"
+        first_goal = goals_data[0]["activity"] if goals_data else None
+        specific_hint = (
+            f"Mention {first_goal} by name as one example of what's coming. "
+            if first_goal else ""
+        )
+    except Exception:
+        goals_summary = "your goals"
+        specific_hint = ""
+
     wrap_up = await _coach_voice(
         coach_prompt,
-        "All goals are scheduled. Tell the user you will be texting them on schedule and you are ready to get to work. One message, in character."
+        f"Onboarding complete. The user has set up: {goals_summary}. "
+        f"Tell them you will text them before each activity, send a daily check-in, and a nightly recap. "
+        f"{specific_hint}"
+        "Be specific about what they will hear from you. One SMS. Stay in character."
     )
     return wrap_up
 
@@ -568,32 +608,55 @@ async def handle_onboarding(
             return "Still setting things up, give me one more second."
         return "Almost there — check your messages."
 
-    # ── Step 2 — city received ────────────────────────────────────────────
+    # ── Step 2 — timezone received ────────────────────────────────────────
     if step == 2:
         coach_res = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
         coach_prompt = coach_res.data[0].get("generated_system_prompt", "") if coach_res.data else ""
 
-        tz_input = message_body.strip()
-        tz = await _parse_timezone(tz_input)
+        # Guard: if message looks like goals/schedule (contains day names), skip tz parse and treat
+        # this as the step 3 goals message so the user doesn't lose their input.
+        _DAY_TRIGGERS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+                         "daily", "every day", "everyday", "weekdays", "nightly", "every night"]
+        msg_lower = message_body.lower()
+        if any(kw in msg_lower for kw in _DAY_TRIGGERS):
+            logger.info(f"[onboarding] user={user_id} step 2 message looks like goals, defaulting tz + routing to step 3")
+            tz = "America/New_York"
+            supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "onboarding_timezone").execute()
+            supabase.table("user_context").insert({
+                "user_id": user_id,
+                "type": "onboarding_timezone",
+                "description": tz,
+                "expires_at": _expires_24h(),
+            }).execute()
+            supabase.table("users").update({"onboarding_step": 3}).eq("id", user_id).execute()
+            # Fall through to step 3 logic below with the same message_body
+            step = 3
 
-        supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "onboarding_timezone").execute()
-        supabase.table("user_context").insert({
-            "user_id": user_id,
-            "type": "onboarding_timezone",
-            "description": tz,
-            "expires_at": _expires_24h(),
-        }).execute()
+        else:
+            tz_input = message_body.strip()
+            tz = await _parse_timezone(tz_input)
 
-        supabase.table("users").update({"onboarding_step": 3}).eq("id", user_id).execute()
-        logger.info(f"[onboarding] user={user_id} tz_input='{tz_input}' tz='{tz}' step→3")
+            supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "onboarding_timezone").execute()
+            supabase.table("user_context").insert({
+                "user_id": user_id,
+                "type": "onboarding_timezone",
+                "description": tz,
+                "expires_at": _expires_24h(),
+            }).execute()
 
-        # Ask for goals+schedule
-        goals_ask = await _coach_voice(
-            coach_prompt,
-            "Tell the user you have their timezone and now ask what habits they want to work on and when. One sentence in your voice."
-        )
-        goals_msg = f"{goals_ask} Like gym Monday Wednesday Friday at 6pm or reading every night at 9pm."
-        return goals_msg
+            supabase.table("users").update({"onboarding_step": 3}).eq("id", user_id).execute()
+            logger.info(f"[onboarding] user={user_id} tz_input='{tz_input}' tz='{tz}' step→3")
+
+            # Ask for goals+schedule — example generated in-character to match persona voice
+            goals_ask = await _coach_voice(
+                coach_prompt,
+                "Tell the user you have their timezone and now ask what habits they want to work on and when. One sentence in your voice."
+            )
+            example = await _coach_voice(
+                coach_prompt,
+                "Give one short example of a habit with a schedule, like 'gym Monday Wednesday Friday at 6pm'. One phrase only, no intro sentence. Stay in your voice."
+            )
+            return f"{goals_ask} Like {example}"
 
     # ── Step 3 — goals+schedule received ──────────────────────────────────
     if step == 3:
@@ -641,13 +704,12 @@ async def handle_onboarding(
                 "The user's reply was unclear. Ask them to list their activities and schedule again. Give the example: gym Monday Wednesday Friday at 6pm or reading every night at 9pm. One sentence in your voice."
             )
 
-        # Insert goals into DB
+        # Insert goals into DB — merge if same activity appears multiple times (different time groups)
         for item in extracted:
             try:
-                # Check if this goal already exists for this user
                 existing = (
                     supabase.table("goals")
-                    .select("id")
+                    .select("id, days, times_per_day")
                     .eq("user_id", user_id)
                     .ilike("activity", item["activity"])
                     .limit(1)
@@ -655,7 +717,16 @@ async def handle_onboarding(
                 )
                 payload = _build_goal_payload(item)
                 if existing.data:
-                    supabase.table("goals").update(payload).eq("id", existing.data[0]["id"]).execute()
+                    ex = existing.data[0]
+                    merged_days = list(set((ex.get("days") or []) + payload.get("days", [])))
+                    merged_times = {**(ex.get("times_per_day") or {}), **(payload.get("times_per_day") or {})}
+                    merge = {}
+                    if merged_days:
+                        merge["days"] = merged_days
+                    if merged_times:
+                        merge["times_per_day"] = merged_times
+                    if merge:
+                        supabase.table("goals").update(merge).eq("id", ex["id"]).execute()
                 else:
                     supabase.table("goals").insert({
                         "user_id": user_id,
@@ -720,30 +791,38 @@ async def handle_onboarding(
         corrected = await _extract_correction(message_body, existing_goals)
         if corrected:
             goal_by_name = {g["activity"].lower(): g for g in existing_goals}
+
+            # Group by activity — same activity may appear multiple times for different time slots
+            grouped: dict[str, list[dict]] = {}
             for item in corrected:
-                matched = goal_by_name.get(item["activity"].lower())
+                key = item["activity"].lower()
+                grouped.setdefault(key, []).append(item)
+
+            for activity_lower, items in grouped.items():
+                matched = goal_by_name.get(activity_lower)
                 if not matched:
                     continue
 
-                update_payload: dict = {}
-                if item["days"]:
+                all_days: list[str] = []
+                times_map: dict = {}
+                for item in items:
                     days_lower = [d.lower() for d in item["days"]]
-                    update_payload["days"] = days_lower
-                    if item["time"]:
-                        times_map = {
-                            _FULL_TO_ABBR[d]: {"times": [item["time"]]}
-                            for d in days_lower if d in _FULL_TO_ABBR
-                        }
-                        update_payload["times_per_day"] = times_map
-                elif item["time"]:
-                    # Only time given — update times for already-stored days
-                    existing_days = matched.get("days") or []
-                    if existing_days:
-                        times_map = {
-                            _FULL_TO_ABBR[d]: {"times": [item["time"]]}
-                            for d in existing_days if d in _FULL_TO_ABBR
-                        }
-                        update_payload["times_per_day"] = times_map
+                    all_days.extend(days_lower)
+                    if item["time"] and days_lower:
+                        for d in days_lower:
+                            if d in _FULL_TO_ABBR:
+                                times_map[_FULL_TO_ABBR[d]] = {"times": [item["time"]]}
+                    elif item["time"] and not days_lower:
+                        # Time without days — apply to existing stored days
+                        for d in (matched.get("days") or []):
+                            if d in _FULL_TO_ABBR:
+                                times_map[_FULL_TO_ABBR[d]] = {"times": [item["time"]]}
+
+                update_payload: dict = {}
+                if all_days:
+                    update_payload["days"] = list(set(all_days))
+                if times_map:
+                    update_payload["times_per_day"] = times_map
 
                 if update_payload:
                     supabase.table("goals").update(update_payload).eq("id", matched["id"]).execute()
@@ -781,10 +860,14 @@ async def handle_onboarding(
         ctx_id = ctx_res.data[0]["id"] if ctx_res.data else None
 
         if awaiting_time:
-            # Second pass — try to get the time from their reply
-            time_raw = _normalize_time(message_body.strip())
+            # Second pass — check yes/no first to handle "no" correctly before trying time parse
+            second_answer = await _parse_yes_no(message_body)
             if ctx_id:
                 supabase.table("user_context").delete().eq("id", ctx_id).execute()
+            if second_answer is False:
+                # Explicit no on second ask — skip check-in
+                return await _finalize_onboarding(user_id, from_number, coach_prompt, None, supabase)
+            time_raw = _normalize_time(message_body.strip())
             checkin_time = time_raw or "08:00"
             return await _finalize_onboarding(user_id, from_number, coach_prompt, checkin_time, supabase)
 

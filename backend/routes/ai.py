@@ -680,6 +680,8 @@ async def get_persona_examples_block(coach: dict) -> str:
         sounds_like = coach.get("sounds_like") or coach.get("coach_name", "")
         if sounds_like:
             persona = await persona_manager.fetch_persona_by_name(sounds_like)
+            if persona is None:
+                logger.warning(f"[persona_examples] sounds_like='{sounds_like}' not found in personas table — voice will be generic")
         if persona is None:
             personality_id = coach.get("personality_id", "")
             if personality_id:
@@ -1010,11 +1012,15 @@ async def generate_nightly_summary(
     elif missed_goals and not completions:
         day_outcome = f"nothing completed. Missed: {missed_names}"
         tone_hint   = "Don't lecture — you already addressed it during the day. Be honest but don't pile on. Forward focus."
-    else:
+    elif completions or missed_goals:
         done_part   = f"completed: {done_names}" if done_names else ""
         missed_part = f"missed: {missed_names}" if missed_names else ""
         day_outcome = "; ".join(filter(None, [done_part, missed_part]))
         tone_hint   = "Be honest about both sides. Acknowledge the wins, acknowledge what didn't happen. Don't over-praise or lecture."
+    else:
+        # No goal activity logged — only context (mood, notes, etc.)
+        day_outcome = "no specific goal activity logged today"
+        tone_hint   = "Keep it brief. Ask if anything happened worth noting."
 
     context_note = f"Additional context from today: {ctx_block}. " if ctx_block else ""
 
