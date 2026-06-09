@@ -6,10 +6,10 @@ All functions are async. Fail open on infrastructure errors — never
 cut off a user because Supabase or Stripe had a blip.
 
 Environment variables required:
-    STRIPE_SECRET_KEY   — Stripe secret key (sk_live_... or sk_test_...)
-    STRIPE_PRICE_ID     — Stripe price ID for the subscription product
+    STRIPE_SECRET_KEY     — Stripe secret key (sk_live_... or sk_test_...)
+    STRIPE_PRICE_ID       — Stripe price ID for the subscription product
     STRIPE_WEBHOOK_SECRET — Stripe webhook signing secret (whsec_...)
-    FRONTEND_URL        — Base URL for checkout success/cancel redirects
+    FRONTEND_URL          — Base URL for checkout success/cancel redirects
 """
 
 import logging
@@ -136,6 +136,7 @@ async def create_checkout_session(user_id: str) -> str:
         line_items=[{"price": os.getenv("STRIPE_PRICE_ID"), "quantity": 1}],
         success_url=f"{frontend_url}?paid=true",
         cancel_url=frontend_url,
+        expires_after=86400,  # 24 hours — Stripe's maximum session lifetime
     )
     logger.info(f"[billing] checkout session created for user={user_id}")
     return session.url
@@ -224,6 +225,44 @@ async def generate_trial_upsell_sms(user_id: str, trial_day: int, days_active: i
     except Exception:
         logger.exception(f"[billing] Gemini upsell generation failed for user={user_id}")
         return f"Trial ends soon. Stay in it: {checkout_url}"
+
+
+async def generate_cutoff_reply(user_id: str, checkout_url: str) -> str:
+    """
+    Generate an in-character coach reply when an expired trial user texts in.
+    Called from the inbound SMS pipeline when is_billable() returns False.
+    Includes a fresh checkout link and stays in the coach's voice.
+    """
+    try:
+        coach_res = (
+            supabase.table("coach_settings")
+            .select("generated_system_prompt")
+            .eq("user_id", user_id)
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        system_prompt = coach_res.data[0].get("generated_system_prompt", "") if coach_res.data else ""
+    except Exception:
+        system_prompt = ""
+
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        model = genai.GenerativeModel(
+            "gemini-2.5-flash-lite",
+            system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
+        )
+        response = model.generate_content(
+            f"The user's free trial ended but they just texted you — they want to keep going. "
+            f"Tell them in your voice that their trial is up but you're still here if they commit. "
+            f"Include this sign-up link: {checkout_url}. "
+            f"Stay in character. No guilt-tripping. Direct and real. One or two sentences max."
+        )
+        return response.text.strip()
+    except Exception:
+        logger.exception(f"[billing] cutoff reply generation failed for user={user_id}")
+        return f"Trial's up but I'm still here. Pick it back up: {checkout_url}"
 
 
 async def generate_trial_warning_sms(user_id: str, hours_remaining: int) -> str:

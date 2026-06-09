@@ -5,7 +5,7 @@
     {
       "label": "no_goals: returns SMS-length text",
       "expected": "non-empty SMS",
-      "got": "What are you attacking today...",
+      "got": "What are you focused on today...",
       "pass": true,
       "detail": ""
     },
@@ -26,112 +26,112 @@
     {
       "label": "before: mentions the scheduled goal by name",
       "expected": "contains 'weight lifting'",
-      "got": "Alright, it's 8 AM. You've got weight lifting at 6 PM. That's it. That's the pla",
+      "got": "Alright, it's 8 AM. You've got weight lifting at 6 PM. That's the only thing on ",
       "pass": true,
       "detail": ""
     },
     {
       "label": "before: does NOT ask about past completion (nothing done yet)",
       "expected": "no past-tense questions",
-      "got": "Alright, it's 8 AM. You've got weight lifting at 6 PM. That's it. That's the plan. Don't drift throu",
+      "got": "Alright, it's 8 AM. You've got weight lifting at 6 PM. That's the only thing on paper today. You bet",
       "pass": true,
       "detail": "'before' messages should prime forward, not ask if something was done"
     },
     {
       "label": "during: returns SMS-length text",
       "expected": "non-empty SMS",
-      "got": "How long did you read for?...",
+      "got": "What did you read?...",
       "pass": true,
       "detail": ""
     },
     {
       "label": "during: asks about pending goal ('reading'), not the confirmed one",
       "expected": "mentions reading/book/page/chapter",
-      "got": "How long did you read for?",
+      "got": "What did you read?",
       "pass": true,
       "detail": "coach should ask about still-pending goal, not the one already confirmed"
     },
     {
       "label": "after: returns SMS-length text",
       "expected": "non-empty SMS",
-      "got": "Weight lifting and reading don...",
+      "got": "Alright. Weight lifting and re...",
       "pass": true,
       "detail": ""
     },
     {
       "label": "after: mentions 'weight lifting' in end-of-day recap",
       "expected": "contains 'weight lifting'",
-      "got": "Weight lifting and reading done. Felt strong. Good. What are you attacking tomorrow?",
+      "got": "Alright. Weight lifting and reading done. Felt strong on the weights. Good. What's the plan to make ",
       "pass": true,
       "detail": ""
     },
     {
       "label": "during+missed: returns SMS-length text",
       "expected": "non-empty SMS",
-      "got": "What page are you on with that...",
+      "got": "What are you reading today?...",
       "pass": true,
       "detail": ""
     },
     {
       "label": "during+missed: asks about pending 'reading' goal (by word or concept)",
       "expected": "reading/book/page reference",
-      "got": "What page are you on with that book?",
+      "got": "What are you reading today?",
       "pass": true,
       "detail": "coach should ask about what's still pending, not re-interrogate the already-missed item"
     },
     {
       "label": "during+missed: does NOT re-ask about already-MISSED gym goal",
       "expected": "no re-interrogation of missed goal",
-      "got": "What page are you on with that book?",
+      "got": "What are you reading today?",
       "pass": true,
       "detail": ""
     },
     {
       "label": "all-done: returns SMS-length text",
       "expected": "non-empty SMS",
-      "got": "You hit a new PR in weight lif...",
+      "got": "Respect. You hit a new PR in w...",
       "pass": true,
       "detail": ""
     },
     {
       "label": "all-done: mentions 'weight lifting' specifically",
       "expected": "contains 'weight lifting'",
-      "got": "You hit a new PR in weight lifting. Solid. What else did you do today that mattered?",
+      "got": "Respect. You hit a new PR in weight lifting. That's what I want to hear. What else did you do today?",
       "pass": true,
       "detail": ""
     },
     {
       "label": "all-done: includes a forward-looking or closing element",
       "expected": "closing/tomorrow question",
-      "got": "You hit a new PR in weight lifting. Solid. What else did you do today that mattered?",
+      "got": "Respect. You hit a new PR in weight lifting. That's what I want to hear. What else did you do today?",
       "pass": true,
       "detail": ""
     },
     {
       "label": "all-missed: returns SMS-length text",
       "expected": "non-empty SMS",
-      "got": "Zero weight lifting. What else...",
+      "got": "Ok, no weight lifting. What el...",
       "pass": true,
       "detail": ""
     },
     {
       "label": "all-missed: mentions 'weight lifting'",
       "expected": "contains 'weight lifting'",
-      "got": "Zero weight lifting. What else did you accomplish today?",
+      "got": "Ok, no weight lifting. What else did you do today worth noting?",
       "pass": true,
       "detail": ""
     },
     {
       "label": "mixed: returns SMS-length text",
       "expected": "non-empty SMS",
-      "got": "You got the weights done. Good...",
+      "got": "Ok, you got the lifting done. ...",
       "pass": true,
       "detail": ""
     },
     {
       "label": "mixed: mentions completed goal 'weight lifting'",
       "expected": "contains 'weight lifting'",
-      "got": "You got the weights done. Good. Reading didn't happen because you ran out of time. You know that's bullshit. When did yo",
+      "got": "Ok, you got the lifting done. Missed the reading though, ran out of time. What else did you get done today.",
       "pass": true,
       "detail": ""
     },

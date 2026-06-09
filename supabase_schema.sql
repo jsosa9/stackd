@@ -463,3 +463,90 @@ ALTER TABLE public.users
 
 CREATE INDEX IF NOT EXISTS idx_users_subscription_status
   ON public.users(subscription_status);
+
+-- =========================
+-- GOAL COMPLETIONS
+-- Tracks daily goal check-ins. Used by nightly summaries and streak logic.
+-- The unique constraint prevents double-counting if the user checks in twice.
+-- =========================
+CREATE TABLE public.goal_completions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  goal_id UUID NOT NULL REFERENCES public.goals(id) ON DELETE CASCADE,
+  completed_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id, goal_id, completed_date)
+);
+
+ALTER TABLE public.goal_completions ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can manage own completions"
+ON public.goal_completions FOR ALL
+USING (auth.uid() = user_id);
+
+-- Service role needs INSERT for the backend pipeline
+CREATE POLICY "Service role can insert completions"
+ON public.goal_completions FOR INSERT
+WITH CHECK (true);
+
+CREATE INDEX idx_goal_completions_user_date
+ON public.goal_completions(user_id, completed_date DESC);
+
+-- =========================
+-- USER MEMORY
+-- Rolling memory document per user. Updated nightly by the memory builder job.
+-- Stores accumulated coach knowledge: personality signals, obstacles, wins,
+-- relationship notes, and coach calibration tips derived from message history.
+-- =========================
+CREATE TABLE public.user_memory (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  memory_doc JSONB DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id)
+);
+
+ALTER TABLE public.user_memory ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can read own memory"
+ON public.user_memory FOR SELECT
+USING (auth.uid() = user_id);
+
+CREATE POLICY "Service role can manage memory"
+ON public.user_memory FOR ALL
+WITH CHECK (true);
+
+CREATE INDEX idx_user_memory_user_id ON public.user_memory(user_id);
+
+-- =========================
+-- TOPIC MEMORY
+-- Structured per-topic memory extracted from every inbound message.
+-- Each row is one topic, project, event, goal, or concern for a user.
+-- status: active | resolved | dormant
+-- importance: 0.1 (passing mention) → 1.0 (life-changing event)
+-- =========================
+CREATE TABLE public.topic_memory (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  topic TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  importance FLOAT NOT NULL DEFAULT 0.5,
+  status TEXT NOT NULL DEFAULT 'active',
+  last_mentioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.topic_memory ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can read own topic memory"
+ON public.topic_memory FOR SELECT
+USING (auth.uid() = user_id);
+
+CREATE POLICY "Service role can manage topic memory"
+ON public.topic_memory FOR ALL
+WITH CHECK (true);
+
+CREATE INDEX idx_topic_memory_user_status ON public.topic_memory(user_id, status);
+CREATE INDEX idx_topic_memory_user_importance ON public.topic_memory(user_id, importance DESC, last_mentioned_at DESC);

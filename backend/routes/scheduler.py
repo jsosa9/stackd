@@ -169,6 +169,25 @@ def send_scheduled_checkins() -> None:
         already_sent = supabase.table("user_context").select("id").eq("user_id", user_id).eq("type", "checkin_sent").eq("description", today_str_pre).execute()
         if already_sent.data:
             continue
+
+        # Skip if the user sent or received a message in the last 10 minutes —
+        # firing a scheduled check-in mid-conversation makes the bot feel robotic.
+        try:
+            ten_min_ago = (datetime.now(pytz.UTC) - timedelta(minutes=10)).isoformat()
+            recent = (
+                supabase.table("messages")
+                .select("id")
+                .eq("user_id", user_id)
+                .gte("created_at", ten_min_ago)
+                .limit(1)
+                .execute()
+            )
+            if recent.data:
+                logger.debug(f"[checkin] skipping — user {user_id} active in last 10m")
+                continue
+        except Exception:
+            pass
+
         supabase.table("user_context").insert({"user_id": user_id, "type": "checkin_sent", "description": today_str_pre}).execute()
 
         day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -190,6 +209,7 @@ def send_scheduled_checkins() -> None:
                 text = run_async(generate_contextual_checkin(
                     user_id, "no_goals", [], [], [],
                     checkin_time_display=local_now.strftime("%-I:%M %p"),
+                    user_timezone=tz_name,
                 ))
                 send_sms(user["phone"], text)
                 log_message(user_id, text)
@@ -245,6 +265,7 @@ def send_scheduled_checkins() -> None:
                 notification_states,
                 user_context_today,
                 checkin_time_display=local_now.strftime("%-I:%M %p"),
+                user_timezone=tz_name,
             ))
             send_sms(user["phone"], text)
             log_message(user_id, text)
@@ -366,7 +387,7 @@ def send_motivation_messages() -> None:
         logger.info(f"Sending motivation to {user.get('name', user_id)}")
 
         try:
-            text = run_async(deliver_motivation_text(user_id))
+            text = run_async(deliver_motivation_text(user_id, tz_name))
             send_sms(user["phone"], text)
             log_message(user_id, text)
         except Exception:
@@ -1057,9 +1078,8 @@ def send_weekly_reflections() -> None:
 
             try:
                 # Get this week's messages (last 7 days)
-                week_ago = (datetime.now(pytz.UTC) - timedelta(days=7)).isoformat()
                 week_msgs = run_async(get_message_history(user_id, limit=50))
-                
+
                 # Get upcoming deadlines
                 deadlines_res = (
                     supabase.table("deadlines")
@@ -1068,34 +1088,56 @@ def send_weekly_reflections() -> None:
                     .eq("active", True)
                     .execute()
                 )
-                
-                # Get active context
-                coach = user.get("coach_settings", {})
-                system_prompt = coach.get("generated_system_prompt", "")
+
+                # Fetch system prompt directly — the nested join on users returns a list,
+                # not a dict, so we can't call .get() on it reliably.
+                coach_res = (
+                    supabase.table("coach_settings")
+                    .select("generated_system_prompt")
+                    .eq("user_id", user_id)
+                    .eq("is_active", True)
+                    .limit(1)
+                    .execute()
+                )
+                system_prompt = (
+                    coach_res.data[0].get("generated_system_prompt", "")
+                    if coach_res.data else ""
+                )
+
                 active_context = run_async(get_active_context(user_id))
-                
                 if active_context:
                     system_prompt = f"{system_prompt}\n\n{active_context}"
-                
-                # Build prompt with week context
+
+                # Format the week's actual conversation for injection into the prompt
+                week_summary = ""
+                if week_msgs:
+                    lines = []
+                    for msg in week_msgs[-30:]:   # cap to last 30 exchanges
+                        role = "User" if msg["direction"] == "inbound" else "Coach"
+                        lines.append(f"{role}: {msg['body'][:200]}")
+                    if lines:
+                        week_summary = "This week's conversations:\n" + "\n".join(lines)
+
                 deadline_list = ""
                 if deadlines_res.data:
                     deadline_list = "Upcoming: " + ", ".join(
                         d["description"] for d in deadlines_res.data[:3]
                     )
-                
+
                 # Generate reflection
                 model = genai.GenerativeModel(
                     model_name="gemini-2.5-flash-lite",
                     system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
                 )
-                
+
                 prompt = (
-                    f"It's Sunday evening. Time for a weekly reflection. "
-                    f"Look back at this week's conversations and summarize what the user accomplished. "
-                    f"Ask them what went well and what they want to focus on next week. "
+                    f"It's Sunday evening. Here is what you and the user talked about this week:\n\n"
+                    f"{week_summary}\n\n"
+                    "Based on the above, summarize what the user worked on and accomplished this week. "
+                    "Ask them what went well and what they want to focus on next week. "
                     f"{f'Reference these upcoming commitments: {deadline_list}. ' if deadline_list else ''}"
-                    f"Keep it conversational and warm, 2-3 sentences. Feel like a real coach wrapping up the week."
+                    "Keep it conversational, 2-3 sentences. Be specific to what you see in the conversations — "
+                    "don't be generic. Feel like a real coach wrapping up the week."
                 )
                 
                 response = model.generate_content(prompt)
@@ -1174,9 +1216,22 @@ def detect_silent_users() -> None:
                 )
                 hours_silent = (now_utc - last_msg_time).total_seconds() / 3600
                 
-                # Determine escalation level based on hours silent
-                # Each level fires exactly once (deduped via user_context)
+                # Determine escalation level based on hours silent.
+                # If the user is currently active (< 48h), clear any previous escalation
+                # markers so they reset from "gentle" if they go silent again in the future.
                 if hours_silent < 48:
+                    # User is active — clear old escalation markers so silence
+                    # re-escalates from "gentle" if they go quiet again later.
+                    try:
+                        supabase.table("user_context").delete() \
+                            .eq("user_id", user_id) \
+                            .in_("type", [
+                                "silent_gentle", "silent_direct",
+                                "silent_nuclear", "silent_day5", "silent_day7",
+                            ]) \
+                            .execute()
+                    except Exception:
+                        pass
                     continue
                 elif hours_silent < 72:
                     escalation = "gentle"
@@ -1322,7 +1377,7 @@ def send_activity_notifications() -> None:
             try:
                 goals_res = (
                     supabase.table("goals")
-                    .select("activity, times_per_day")
+                    .select("id, activity, times_per_day")
                     .eq("user_id", user_id)
                     .execute()
                 )
@@ -1330,9 +1385,22 @@ def send_activity_notifications() -> None:
                 scheduler_logger.error(f"Failed to fetch goals for user {user_id}: {e}")
                 continue
 
+            # Fetch streaks once per user to avoid per-goal DB calls
+            try:
+                streak_res = (
+                    supabase.table("streaks")
+                    .select("goal_id, current_streak")
+                    .eq("user_id", user_id)
+                    .execute()
+                )
+                streak_map = {s["goal_id"]: s.get("current_streak", 0) for s in (streak_res.data or [])}
+            except Exception:
+                streak_map = {}
+
             for goal in goals_res.data or []:
-                activity = goal["activity"]
-                times_per_day = goal.get("times_per_day") or {}
+                activity       = goal["activity"]
+                goal_streak    = streak_map.get(goal.get("id", ""), 0)
+                times_per_day  = goal.get("times_per_day") or {}
                 today_sched = times_per_day.get(today_abbr, {})
                 times = today_sched.get("times", []) if isinstance(today_sched, dict) else []
 
@@ -1396,7 +1464,7 @@ def send_activity_notifications() -> None:
 
                                 try:
                                     from routes.ai import generate_activity_notification_text
-                                    body = run_async(generate_activity_notification_text(user_id, activity, time_12h))
+                                    body = run_async(generate_activity_notification_text(user_id, activity, time_12h, current_streak=goal_streak))
                                 except Exception as ai_err:
                                     scheduler_logger.error(f"AI pre-notification failed for {user_id}/{activity}: {ai_err}")
                                     body = f"{activity} at {time_12h}. You in? Reply YES, NO, or RESCHEDULE."
@@ -1427,6 +1495,98 @@ def send_activity_notifications() -> None:
                         scheduler_logger.error(
                             f"Error processing notification for {activity}, user {user_id}: {e}"
                         )
+
+            # ── Secondary check: rescheduled notifications ───────────────────
+            # When a user replies RESCHEDULE, handle_notification_reply() inserts a new
+            # SCHEDULED (or NOTIFIED) row with the new time. The main goal-time loop above
+            # only reads from goals.times_per_day and won't pick up these rows.
+            # We fire them here, excluding any time that matches an original goal time
+            # (to prevent double-firing if the user happens to reschedule to the same time).
+            try:
+                # Build a set of original (activity, time) pairs for today
+                original_times: set[tuple[str, str]] = set()
+                for g in goals_res.data or []:
+                    tpd       = g.get("times_per_day") or {}
+                    day_sched = tpd.get(today_abbr, {})
+                    for t in (day_sched.get("times") or []):
+                        original_times.add((g["activity"], t))
+
+                rescheduled_res = (
+                    supabase.table("activity_notifications")
+                    .select("id, activity, scheduled_time, state")
+                    .eq("user_id", user_id)
+                    .eq("scheduled_date", today_date)
+                    .in_("state", ["SCHEDULED", "NOTIFIED"])
+                    .execute()
+                )
+
+                for notif_row in rescheduled_res.data or []:
+                    act      = notif_row["activity"]
+                    time_str = notif_row.get("scheduled_time")
+                    if not time_str:
+                        continue
+                    # Skip rows that are the original goal time — the main loop handles those
+                    if (act, time_str) in original_times:
+                        continue
+
+                    try:
+                        sched_h, sched_m = map(int, time_str.split(":"))
+                    except (ValueError, AttributeError):
+                        continue
+
+                    trigger_total = (sched_h * 60 + sched_m - 30 + 1440) % 1440
+                    trigger_h     = trigger_total // 60
+                    trigger_m     = trigger_total % 60
+                    is_30min      = local_now.hour == trigger_h and local_now.minute == trigger_m
+                    is_start      = local_now.hour == sched_h and local_now.minute == sched_m
+
+                    if not is_30min and not is_start:
+                        continue
+
+                    hour_12  = sched_h % 12 or 12
+                    period   = "AM" if sched_h < 12 else "PM"
+                    time_12h = f"{hour_12}:{str(sched_m).zfill(2)} {period}"
+                    now_utc_iso = datetime.now(pytz.UTC).isoformat()
+
+                    try:
+                        if is_30min and notif_row["state"] == "SCHEDULED":
+                            try:
+                                from routes.ai import generate_activity_notification_text
+                                body = run_async(generate_activity_notification_text(user_id, act, time_12h))
+                            except Exception:
+                                body = f"{act} rescheduled — heads up for {time_12h}. Still on? Reply YES, NO, or RESCHEDULE."
+                            send_sms(user["phone"], body)
+                            log_message(user_id, body)
+                            supabase.table("activity_notifications").update({
+                                "state":       "NOTIFIED",
+                                "notified_at": now_utc_iso,
+                                "updated_at":  now_utc_iso,
+                            }).eq("id", notif_row["id"]).execute()
+                            scheduler_logger.info(f"RESCHEDULED 30-MIN: {user.get('name')} / {act} at {time_12h}")
+
+                        elif is_start:
+                            # Re-fetch state — user may have confirmed after our query
+                            fresh = (
+                                supabase.table("activity_notifications")
+                                .select("state")
+                                .eq("id", notif_row["id"])
+                                .execute()
+                            )
+                            if fresh.data and fresh.data[0]["state"] == "CONFIRMED":
+                                try:
+                                    from routes.ai import generate_activity_start_text
+                                    start_body = run_async(generate_activity_start_text(user_id, act))
+                                except Exception:
+                                    start_body = f"It's time. {act} starts now. Let's go."
+                                send_sms(user["phone"], start_body)
+                                log_message(user_id, start_body)
+                                scheduler_logger.info(f"RESCHEDULED START: {user.get('name')} / {act} at {time_12h}")
+
+                    except Exception as e:
+                        scheduler_logger.error(f"Error in rescheduled notification for {act}, user {user_id}: {e}")
+
+            except Exception as e:
+                scheduler_logger.error(f"Rescheduled notification check failed for user {user_id}: {e}")
 
     except Exception as e:
         scheduler_logger.error(f"Critical error in activity notification job: {e}", exc_info=True)
@@ -1640,6 +1800,170 @@ def send_trial_warnings() -> None:
         scheduler_logger.error(f"Critical error in trial warning job: {e}", exc_info=True)
 
 
+def send_streak_at_risk_warnings() -> None:
+    """
+    Runs every minute. At 8pm in each user's local timezone, checks if they have
+    an active streak on any goal scheduled today that hasn't been checked in on.
+    Sends one personalised "don't break it tonight" message per qualifying streak.
+
+    Deduplicates via user_context (type='streak_at_risk_sent', description=YYYY-MM-DD:goal_id).
+    """
+    FIRE_HOUR = 20  # 8pm local
+
+    scheduler_logger.debug("Running streak-at-risk job")
+
+    try:
+        schedules_res = supabase.table("schedule").select(
+            "user_id, timezone, users(id, phone, name, paused, sms_consent_given_at)"
+        ).execute()
+
+        for sched in schedules_res.data or []:
+            user = sched.get("users")
+            if not user or not user.get("phone"):
+                continue
+            if user.get("paused"):
+                continue
+            if not run_async(is_billable(user.get("id", ""))):
+                continue
+            if not user.get("sms_consent_given_at"):
+                continue
+
+            user_id = user["id"]
+            tz_name = sched.get("timezone", "America/New_York")
+
+            try:
+                tz = pytz.timezone(tz_name)
+            except Exception:
+                tz = pytz.timezone("America/New_York")
+
+            local_now = datetime.now(tz)
+            if local_now.hour != FIRE_HOUR or local_now.minute != 0:
+                continue
+
+            today_str   = local_now.strftime("%Y-%m-%d")
+            today_lower = local_now.strftime("%A").lower()
+
+            # Streaks for goals scheduled today
+            try:
+                streaks_res = (
+                    supabase.table("streaks")
+                    .select("goal_id, current_streak, goals(activity, days)")
+                    .eq("user_id", user_id)
+                    .gt("current_streak", 0)
+                    .execute()
+                )
+            except Exception:
+                continue
+
+            for streak in streaks_res.data or []:
+                goal_data = streak.get("goals") or {}
+                activity  = goal_data.get("activity", "")
+                days      = goal_data.get("days") or []
+                current   = streak.get("current_streak", 0)
+                goal_id   = streak.get("goal_id")
+
+                if today_lower not in days:
+                    continue   # not scheduled today
+
+                dedup_key = f"{today_str}:{goal_id}"
+                already = (
+                    supabase.table("user_context")
+                    .select("id")
+                    .eq("user_id", user_id)
+                    .eq("type", "streak_at_risk_sent")
+                    .eq("description", dedup_key)
+                    .execute()
+                )
+                if already.data:
+                    continue
+
+                # Check if user already completed this goal today
+                try:
+                    completed = (
+                        supabase.table("goal_completions")
+                        .select("id")
+                        .eq("user_id", user_id)
+                        .eq("goal_id", goal_id)
+                        .eq("completed_date", today_str)
+                        .execute()
+                    )
+                    if completed.data:
+                        continue   # already done — no need for at-risk message
+                except Exception:
+                    pass
+
+                # Also skip if they confirmed via activity notification today
+                try:
+                    confirmed = (
+                        supabase.table("activity_notifications")
+                        .select("id")
+                        .eq("user_id", user_id)
+                        .eq("activity", activity)
+                        .eq("state", "CONFIRMED")
+                        .gte("scheduled_date", today_str)
+                        .execute()
+                    )
+                    if confirmed.data:
+                        continue
+                except Exception:
+                    pass
+
+                # Generate the at-risk message in the coach's voice
+                try:
+                    coach_res = (
+                        supabase.table("coach_settings")
+                        .select("generated_system_prompt")
+                        .eq("user_id", user_id)
+                        .eq("is_active", True)
+                        .limit(1)
+                        .execute()
+                    )
+                    system_prompt = (
+                        coach_res.data[0].get("generated_system_prompt", "")
+                        if coach_res.data else ""
+                    )
+                    model = genai.GenerativeModel(
+                        model_name="gemini-2.5-flash-lite",
+                        system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
+                    )
+                    prompt = (
+                        f"The user is on a {current}-day streak for {activity}. "
+                        f"It's 8pm and they haven't checked in yet today. "
+                        f"Send ONE short message that makes them feel the weight of what they'd lose "
+                        f"if they skip tonight. Reference the streak number. Make it feel real and personal. "
+                        f"1-2 sentences max. In your voice. No questions."
+                    )
+                    message = _strip_markdown(model.generate_content(prompt).text.strip())
+                except Exception as e:
+                    scheduler_logger.warning(f"[streak-at-risk] AI failed for {user_id}/{activity}: {e}")
+                    message = (
+                        f"{current}-day streak on {activity}. "
+                        f"Don't let tonight be the night you break it."
+                    )
+
+                send_sms(user["phone"], message)
+                log_message(user_id, message)
+
+                # Dedup marker — expires tomorrow
+                try:
+                    supabase.table("user_context").insert({
+                        "user_id":     user_id,
+                        "type":        "streak_at_risk_sent",
+                        "description": dedup_key,
+                        "expires_at":  (local_now + timedelta(days=1)).isoformat(),
+                    }).execute()
+                except Exception:
+                    pass
+
+                scheduler_logger.info(
+                    f"[streak-at-risk] {user.get('name', user_id)}: "
+                    f"{activity} ({current}-day streak)"
+                )
+
+    except Exception as e:
+        scheduler_logger.error(f"Critical error in streak-at-risk job: {e}", exc_info=True)
+
+
 def send_nightly_summaries() -> None:
     """
     Runs every minute. At 9pm in each user's local timezone, sends one nightly
@@ -1729,7 +2053,8 @@ def send_nightly_summaries() -> None:
 
         try:
             text = run_async(generate_nightly_summary(
-                user_id, completions, missed_goals, user_context_today
+                user_id, completions, missed_goals, user_context_today,
+                user_timezone=tz_name,
             ))
             send_sms(user["phone"], text)
             log_message(user_id, text)
@@ -1884,17 +2209,26 @@ def start_scheduler() -> None:
         misfire_grace_time=30,
     )
 
+    # Streak-at-risk warnings: every minute (fires at 8pm in each user's local timezone)
+    scheduler.add_job(
+        send_streak_at_risk_warnings,
+        CronTrigger(minute="*"),
+        id="streak_at_risk",
+        replace_existing=True,
+        misfire_grace_time=30,
+    )
+
     scheduler.start()
     logger.info(
-        "APScheduler started with 12 jobs: "
+        "APScheduler started with 14 jobs: "
         "checkins (1m), motivation (30m), reminders (1m), "
         "deadlines (6am UTC), patterns (midnight UTC), "
         "proactive (7am UTC), milestones (9pm UTC), "
         "reflections (Sun 7pm UTC), silence (6h), "
         "activity_notifications (1m), missed_notifications (1m), "
-        "trial_warnings (1h)"
+        "trial_warnings (1h), nightly_summaries (1m), streak_at_risk (1m)"
     )
-    scheduler_logger.info("Scheduler initialized with all 12 jobs")
+    scheduler_logger.info("Scheduler initialized with all 14 jobs")
 
 
 def stop_scheduler() -> None:

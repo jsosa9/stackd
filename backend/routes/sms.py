@@ -107,122 +107,6 @@ def _save_message(user_id: str, direction: str, body: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Activity notification reply helpers
-# ---------------------------------------------------------------------------
-
-_CONFIRMED_PATTERNS = re.compile(
-    r"\b(yes|yeah|yep|yup|sure|definitely|absolutely|im in|i'm in|let'?s go|letsgo|ok|okay|yea|yass)\b",
-    re.IGNORECASE,
-)
-_DECLINED_PATTERNS = re.compile(
-    r"\b(no|nope|nah|can'?t|cannot|skip|not today|not gonna|won'?t|wont|pass|bail)\b",
-    re.IGNORECASE,
-)
-_RESCHEDULE_PATTERNS = re.compile(
-    r"\b(reschedule|tomorrow|later|move|shift|delay|another time|push|soon|instead|different time|change it)\b"
-    r"|\b(\d{1,2}:\d{2})\b"          # time like "3:30"
-    r"|\b(\d{1,2}\s*(am|pm))\b"      # time like "3pm"
-    r"|can\s+we\s+do\s+\d",          # "can we do 8" / "can we do 8:30"
-    re.IGNORECASE,
-)
-
-def parse_notification_reply(body: str) -> str | None:
-    """
-    Parse an SMS body into a notification state.
-    Returns 'CONFIRMED', 'DECLINED', 'RESCHEDULED', or None if unrecognised.
-    Reschedule is checked last so "yes, reschedule me to 3pm" → RESCHEDULED.
-    """
-    text = body.strip()
-    if _RESCHEDULE_PATTERNS.search(text):
-        return "RESCHEDULED"
-    if _CONFIRMED_PATTERNS.search(text):
-        return "CONFIRMED"
-    if _DECLINED_PATTERNS.search(text):
-        return "DECLINED"
-    return None
-
-
-def _extract_reschedule_time(body: str) -> str:
-    """Pull a time string from the reply text, or return empty string."""
-    # Look for HH:MM
-    m = re.search(r"\b(\d{1,2}:\d{2})\s*(am|pm)?\b", body, re.IGNORECASE)
-    if m:
-        t = m.group(1)
-        ampm = m.group(2) or ""
-        return f"{t} {ampm}".strip()
-    # Look for bare "3pm"
-    m2 = re.search(r"\b(\d{1,2})\s*(am|pm)\b", body, re.IGNORECASE)
-    if m2:
-        return f"{m2.group(1)} {m2.group(2)}"
-    # Natural language
-    for word in ("tomorrow", "later", "tonight", "morning", "afternoon", "evening"):
-        if word.lower() in body.lower():
-            return word.capitalize()
-    return ""
-
-
-async def handle_notification_reply(
-    user_id: str,
-    user_data: dict,
-    notif: dict,
-    state: str,
-    reply_text: str,
-) -> str:
-    """
-    Update the activity_notifications row to the new state, then generate
-    and return a personality-aware coach response.
-    """
-    now_iso = datetime.now(timezone.utc).isoformat()
-    rescheduled_to = _extract_reschedule_time(reply_text) if state == "RESCHEDULED" else ""
-
-    update_payload: dict = {
-        "state": state,
-        "replied_at": now_iso,
-        "reply_text": reply_text,
-        "updated_at": now_iso,
-    }
-    if rescheduled_to:
-        update_payload["rescheduled_to"] = rescheduled_to
-
-    try:
-        supabase.table("activity_notifications").update(update_payload).eq("id", notif["id"]).execute()
-    except Exception:
-        logger.exception(f"Failed to update activity_notifications row {notif['id']}")
-
-    # Fetch coach settings for personality
-    coach_res = (
-        supabase.table("coach_settings")
-        .select("generated_system_prompt, coach_personality, coach_intensity")
-        .eq("user_id", user_id)
-        .execute()
-    )
-    coach = coach_res.data[0] if coach_res.data else {}
-
-    # Format scheduled time as 12h for context
-    time_str = notif.get("scheduled_time", "")
-    scheduled_time_12h = ""
-    if time_str:
-        try:
-            h, m = map(int, time_str.split(":"))
-            period = "AM" if h < 12 else "PM"
-            h12 = h % 12 or 12
-            scheduled_time_12h = f"{h12}:{str(m).zfill(2)} {period}"
-        except Exception:
-            pass
-
-    return await generate_notification_response(
-        state=state,
-        activity=notif["activity"],
-        user_name=user_data.get("name") or "there",
-        system_prompt=coach.get("generated_system_prompt", ""),
-        coach_personality=coach.get("coach_personality") or "hype",
-        coach_intensity=coach.get("coach_intensity") or 3,
-        scheduled_time_12h=scheduled_time_12h,
-        rescheduled_to=rescheduled_to,
-    )
-
-
-# ---------------------------------------------------------------------------
 # Background inbound processor
 # ---------------------------------------------------------------------------
 
@@ -243,63 +127,6 @@ async def _resolve_message_intent(messages: list[str]) -> str:
     except Exception:
         logger.exception("[sms] intent resolution failed, using last message")
         return messages[-1]
-
-
-async def _gemini_classify_notification_reply(message_body: str, activity: str) -> str | None:
-    """
-    Gemini fallback for ambiguous notification replies that regex couldn't classify.
-    Returns 'CONFIRMED', 'DECLINED', 'RESCHEDULED', or None (truly unclear).
-    """
-    import google.generativeai as genai
-    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-    try:
-        model = genai.GenerativeModel("gemini-2.5-flash-lite")
-        prompt = (
-            f"The user has a scheduled activity: {activity}.\n"
-            f"They replied: \"{message_body}\"\n\n"
-            f"Classify their reply as exactly one of:\n"
-            f"CONFIRMED: they are doing the activity\n"
-            f"DECLINED: they are skipping it\n"
-            f"RESCHEDULED: they want to move it to a different time\n"
-            f"UNCLEAR: cannot determine intent from this message\n\n"
-            f"Reply with exactly one word."
-        )
-        result = model.generate_content(prompt).text.strip().upper()
-        return result if result in ("CONFIRMED", "DECLINED", "RESCHEDULED") else None
-    except Exception:
-        logger.exception("[sms] Gemini notification classifier failed")
-        return None
-
-
-async def _ask_notification_clarification(user_id: str, activity: str) -> str:
-    """Generate a natural in-voice clarification when intent cannot be parsed."""
-    import google.generativeai as genai
-    from routes.ai import HUMAN_BEHAVIOR_RULES
-    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-    try:
-        coach_res = (
-            supabase.table("coach_settings")
-            .select("generated_system_prompt")
-            .eq("user_id", user_id)
-            .eq("is_active", True)
-            .limit(1)
-            .execute()
-        )
-        system_prompt = coach_res.data[0].get("generated_system_prompt") if coach_res.data else ""
-        model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash-lite",
-            system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}",
-        )
-        resp = model.generate_content(
-            f"The user replied to a reminder about '{activity}' but you couldn't tell if they're doing it, "
-            f"skipping it, or rescheduling. Ask them directly, in your voice, whether they're doing it, "
-            f"not doing it, or need to move it. The user must understand they need to give you a clear answer. "
-            f"One short sentence. Do not be vague."
-        )
-        return resp.text.strip()
-    except Exception:
-        logger.exception("[sms] notification clarification generation failed")
-        return "Were you saying you're doing it or skipping it?"
 
 
 async def _process_inbound(from_number: str, token: str, background_tasks: BackgroundTasks) -> None:
@@ -411,7 +238,7 @@ async def _process_inbound(from_number: str, token: str, background_tasks: Backg
         )
         user_data = user_res.data[0] if user_res.data else None
 
-        if user_data is None or user_data.get("onboarding_step", 5) < 5:
+        if user_data is None or user_data.get("onboarding_step", 6) < 6:
             onboarding_reply = await handle_onboarding(
                 from_number, message_body, background_tasks, supabase, user_data
             )
@@ -431,42 +258,60 @@ async def _process_inbound(from_number: str, token: str, background_tasks: Backg
 
         _save_message(user_id, "inbound", message_body)
 
+        # ── Trial cutoff intercept ────────────────────────────────────────────
+        # If the user's trial has expired, bypass the coaching pipeline entirely.
+        # Check when the last checkout link was sent (either by the scheduler's
+        # cutoff message or a previous inbound-triggered resend):
+        #   < 24h ago → session still valid, remind them to use the existing link
+        #   ≥ 24h ago → session expired, generate a fresh one
         try:
-            pending_res = (
-                supabase.table("activity_notifications")
-                .select("id, activity, scheduled_time")
-                .eq("user_id", user_id)
-                .eq("state", "NOTIFIED")
-                .order("notified_at", desc=True)
-                .limit(1)
-                .execute()
-            )
-            if pending_res.data:
-                notif_row = pending_res.data[0]
-                notif_state = parse_notification_reply(message_body)
+            from services.billing import is_billable, _get_checkout_url, generate_cutoff_reply
+            if not await is_billable(user_id):
+                last_link_res = (
+                    supabase.table("user_context")
+                    .select("created_at")
+                    .eq("user_id", user_id)
+                    .in_("type", ["payment_link_sent", "trial_cutoff"])
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
 
-                if notif_state is None:
-                    notif_state = await _gemini_classify_notification_reply(message_body, notif_row["activity"])
-
-                if notif_state is not None:
-                    response_text = await handle_notification_reply(
-                        user_id, user_data, notif_row, notif_state, message_body
+                hours_since = 999.0   # default: assume long ago
+                if last_link_res.data:
+                    sent_at = datetime.fromisoformat(
+                        last_link_res.data[0]["created_at"].replace("Z", "+00:00")
                     )
-                    _save_message(user_id, "outbound", response_text)
-                    logger.info(f"Notification reply {notif_state} for {notif_row['activity']} from {from_number}: {response_text[:80]}")
-                    await _typing_delay(response_text)
-                    send_reply(from_number, _strip_markdown(response_text))
-                    return
+                    hours_since = (datetime.now(timezone.utc) - sent_at).total_seconds() / 3600
+
+                if hours_since >= 24:
+                    # Old session expired — send a fresh checkout link
+                    checkout_url = await _get_checkout_url(user_id)
+                    cutoff_reply = await generate_cutoff_reply(user_id, checkout_url)
+                    # Record so we track the 24h window on the next inbound message
+                    supabase.table("user_context").insert({
+                        "user_id":     user_id,
+                        "type":        "payment_link_sent",
+                        "description": "inbound trigger",
+                        "expires_at":  (datetime.now(timezone.utc) + timedelta(days=2)).isoformat(),
+                    }).execute()
                 else:
-                    # Truly unclear — coach asks for clarification in their voice
-                    clarification = await _ask_notification_clarification(user_id, notif_row["activity"])
-                    _save_message(user_id, "outbound", clarification)
-                    logger.info(f"Notification clarification sent for {notif_row['activity']} to {from_number}: {clarification[:80]}")
-                    await _typing_delay(clarification)
-                    send_reply(from_number, _strip_markdown(clarification))
-                    return
+                    # Link sent less than 24h ago — still valid, no need for a new session
+                    hours_left = max(1, int(24 - hours_since))
+                    cutoff_reply = (
+                        f"That link I sent is still good for about {hours_left} more "
+                        f"hour{'s' if hours_left != 1 else ''}. Tap it when you're ready."
+                    )
+
+                cutoff_reply = _strip_markdown(cutoff_reply)
+                _save_message(user_id, "outbound", cutoff_reply)
+                await _typing_delay(cutoff_reply)
+                send_reply(from_number, cutoff_reply)
+                logger.info(f"[cutoff] intercepted expired trial user {user_id} ({hours_since:.1f}h since last link)")
+                return
+
         except Exception:
-            logger.exception(f"Notification reply intercept failed for user {user_id} — falling through to Gemini")
+            logger.exception(f"[cutoff] billing intercept failed for user {user_id} — falling through to pipeline")
 
         try:
             response_text = await process_inbound_sms(user_id, message_body, user_timezone=user_timezone)

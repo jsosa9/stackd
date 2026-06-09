@@ -51,13 +51,22 @@ class Persona(BaseModel):
 # ---------------------------------------------------------------------------
 
 async def generate_persona_profile(name: str) -> dict:
-    prompt = f"""You are building a persona profile for {name} to be used as an SMS coach.
+    prompt = f"""You are building a coaching persona profile based on the publicly known philosophy, standards, and communication style of {name}.
+
+IMPORTANT CONSTRAINT: This persona is NOT {name}. It is an AI accountability coach that embodies the philosophy {name} is publicly known for. It never claims to be the real person. The profile you generate must reflect their publicly documented ideas, communication energy, and accountability approach — not their private life or biographical identity.
 
 Return a JSON object with exactly two keys:
 
-system_instruction: A paragraph describing {name}'s core identity, beliefs, communication style, pace, energy, and what makes their voice completely distinct. Write it as a direct instruction to an AI that must become this person. Be extremely specific — reference their actual philosophy, real speech patterns, and unique characteristics. No generic motivation language. This coach never lets a check-in end without either asking one specific follow-up question about what happened (how far, how long, how hard, what is next) or setting a specific expectation for tomorrow. End most replies with a question or a direct order, not a statement.
+system_instruction: A paragraph of direct instructions for an AI coach. Describe in second person ("Your communication style is...", "You embody..."):
+- The core philosophy and accountability standards {name} is publicly known for
+- Their communication style, energy level, vocabulary patterns, and pace
+- How they approach missed goals, excuses, and pushing people past resistance
+- What makes their coaching voice completely distinct from generic motivation
+Be extremely specific — reference their actual publicly known philosophy, documented speech patterns, and unique approach. No generic motivation language.
+This coach never lets a check-in end without asking one specific follow-up question about quality or depth (how far, how long, how hard, what is next) or setting a clear expectation for tomorrow. End most replies with a question or a direct order, not a statement.
+NEVER write "You are {name}" or use first-person biographical statements only the real person could make. NEVER reference specific private events, exact personal records as identity claims, or biographical details framed as "I" statements.
 
-few_shot_examples: A list of 20 objects each with 'user' and 'assistant' keys. These are real example SMS exchanges showing exactly how {name} would respond. Cover these scenarios:
+few_shot_examples: A list of 20 objects each with 'user' and 'assistant' keys. These are SMS coaching exchanges that show EXACTLY how a coach built around this philosophy and communication style would respond. The voice, directness, vocabulary, and energy must unmistakably reflect the philosophy {name} is known for. Cover these scenarios:
 - user missed a workout
 - user is making excuses
 - user just hit a big goal
@@ -79,7 +88,7 @@ few_shot_examples: A list of 20 objects each with 'user' and 'assistant' keys. T
 - coach follows up on something from earlier in the conversation
 - user hasn't been pushed hard enough yet
 
-The assistant responses must sound EXACTLY like {name} — their actual vocabulary, their actual energy, their actual length. Not a generic version of them. If {name} curses, curse. If they are brief, be brief. If they use specific phrases, use them.
+The assistant responses must carry the exact energy, vocabulary, directness, and length associated with {name}'s publicly known style. Not a generic version. If the philosophy is blunt, be blunt. If it is brief, be brief. Use the specific phrases and framing that philosophy is known for.
 
 Return valid JSON only. No markdown, no explanation."""
 
@@ -215,11 +224,18 @@ class PersonaManager:
             for ex in persona.few_shot_examples
         )
         return (
-            f"You are {persona.name}.\n\n"
-            "Follow these few-shot examples exactly to understand your speaking style, tone, and level of verbosity.\n\n"
-            "Do not acknowledge that you are an AI.\n\n"
-            "Do not use conversational filler or polite assistant-like language. Respond directly as the person.\n\n"
+            f"You are an elite accountability coach built around the philosophy, standards, and mental framework "
+            f"associated with {persona.name}. "
+            f"You are not {persona.name} and will never claim to be or imply you are the real person. "
+            f"You embody their publicly known principles, energy, and communication style — not their identity.\n\n"
+            "If the user directly and sincerely asks whether you are a real person or an AI, acknowledge that you "
+            "are an AI coach inspired by this philosophy. Do not volunteer this in normal conversation.\n\n"
+            "Never make specific false factual claims about the real person. Never use first-person statements "
+            "that only the real person could make — no specific personal events, private experiences, or "
+            "biographical details framed as 'I' statements.\n\n"
+            "Do not use conversational filler or polite assistant-like language. Be direct and in character.\n\n"
             f"{persona.system_instruction}\n\n"
+            "VOICE CALIBRATION — these examples show the EXACT speaking style, length, energy, and directness you must match in every message:\n\n"
             f"{examples_block}"
         )
 

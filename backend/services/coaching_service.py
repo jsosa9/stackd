@@ -318,6 +318,7 @@ class UserContextProvider(ContextProvider):
     async def fetch(self, user_id: str, params: dict) -> ProviderResult:
         result = ProviderResult()
 
+        # Recent transient signals (last 24h)
         try:
             since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
             res = (
@@ -334,6 +335,46 @@ class UserContextProvider(ContextProvider):
             logger.exception(f"[UserContextProvider] fetch failed for {user_id}")
             return result
 
+        # Permanent/long-lived entries that survive beyond the 24h window.
+        # These are stored at onboarding or accumulated over time and should
+        # always be visible to the coach regardless of when they were created.
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            # No-expiry entries: user profile signals from onboarding + coach insights
+            persistent_res = (
+                supabase.table("user_context")
+                .select("type, description, created_at")
+                .eq("user_id", user_id)
+                .in_("type", ["obstacle", "success_vision", "boundaries", "coach_insight", "coaching_opportunity"])
+                .order("created_at", desc=True)
+                .limit(15)
+                .execute()
+            )
+
+            # Unresolved topics: 72h TTL, beyond the 24h window until they expire
+            topics_res = (
+                supabase.table("user_context")
+                .select("type, description, created_at")
+                .eq("user_id", user_id)
+                .eq("type", "unresolved_topic")
+                .gt("expires_at", now_iso)
+                .order("created_at", desc=True)
+                .limit(10)
+                .execute()
+            )
+
+            # Merge into entries, dedup by (type, description) to avoid showing
+            # the same entry twice when it was also created in the last 24h
+            seen = {(e["type"], e["description"]) for e in entries}
+            for e in (persistent_res.data or []) + (topics_res.data or []):
+                key = (e["type"], e["description"])
+                if key not in seen:
+                    entries.append(e)
+                    seen.add(key)
+        except Exception:
+            logger.exception(f"[UserContextProvider] persistent context fetch failed for {user_id}")
+
         if not entries:
             return result
 
@@ -348,14 +389,18 @@ class UserContextProvider(ContextProvider):
 
         # Render prompt lines grouped by type
         type_labels = {
-            "check-in":      "Check-ins",
-            "personal":      "Journal",
-            "coach_insight": "Coach insights",
-            "mood":          "Mood",
-            "energy":        "Energy",
-            "struggle":      "Struggles",
-            "win":           "Wins",
-            "obstacle":      "Obstacles",
+            "check-in":              "Check-ins",
+            "personal":              "Journal",
+            "coach_insight":         "Coach insights",
+            "unresolved_topic":      "Bring this up naturally when relevant",
+            "obstacle":              "Known obstacle (from their own words)",
+            "success_vision":        "Their 3-month vision / their WHY",
+            "boundaries":            "Topics to never mention",
+            "mood":                  "Mood",
+            "energy":                "Energy",
+            "struggle":              "Struggles",
+            "win":                   "Wins",
+            "coaching_opportunity":  "What they want to work on",
         }
         for entry_type, descriptions in by_type.items():
             label = type_labels.get(entry_type, entry_type.replace("_", " ").title())
@@ -497,13 +542,193 @@ class NutritionProvider(ContextProvider):
 # NutritionProvider is live — nutrition_logs table exists and is indexed on
 # (user_id, reporting_date).
 
+# ---------------------------------------------------------------------------
+# HabitPatternProvider — behavioral patterns from the nightly analyzer
+# ---------------------------------------------------------------------------
+
+class HabitPatternProvider(ContextProvider):
+    """
+    Reads confirmed behavioral patterns (confidence >= 2) from habit_patterns.
+    Tells the coach which days the user is historically quiet or strong,
+    and flags whether today matches a known pattern.
+    """
+
+    @property
+    def name(self) -> str:
+        return "patterns"
+
+    async def fetch(self, user_id: str, params: dict) -> ProviderResult:
+        result   = ProviderResult()
+        now_utc  = params["now_utc"]
+        today_dow = now_utc.weekday()    # 0 = Monday … 6 = Sunday
+        day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+        try:
+            res = (
+                supabase.table("habit_patterns")
+                .select("pattern_type, day_of_week, confidence")
+                .eq("user_id", user_id)
+                .eq("active", True)
+                .gte("confidence", 2)
+                .execute()
+            )
+            patterns = res.data or []
+        except Exception:
+            logger.exception(f"[HabitPatternProvider] fetch failed for {user_id}")
+            return result
+
+        if not patterns:
+            return result
+
+        quiet: list[str]  = []
+        strong: list[str] = []
+        today_quiet  = False
+        today_strong = False
+
+        for p in patterns:
+            day_num  = p.get("day_of_week")
+            conf     = p.get("confidence", 1)
+            ptype    = p.get("pattern_type", "")
+            day_name = day_names[day_num] if day_num is not None else "?"
+
+            if ptype == "quiet_day":
+                quiet.append(f"{day_name} (seen {conf}×)")
+                if day_num == today_dow:
+                    today_quiet = True
+            elif ptype == "strong_day":
+                strong.append(f"{day_name} (seen {conf}×)")
+                if day_num == today_dow:
+                    today_strong = True
+
+        if quiet:
+            result.prompt_lines.append(f"Historically quiet days: {', '.join(quiet)}")
+        if strong:
+            result.prompt_lines.append(f"Historically strong days: {', '.join(strong)}")
+
+        if today_quiet:
+            result.prompt_lines.append(
+                "TODAY is a historically quiet day for this user — open with something "
+                "that pulls them in rather than a question they can easily ignore"
+            )
+            result.anomaly_score += 1
+            result.anomaly_reasons.append("today is a historically quiet day")
+        elif today_strong:
+            result.prompt_lines.append(
+                "TODAY is historically one of this user's strongest days — match their "
+                "energy and raise the bar"
+            )
+
+        result.metadata = {
+            "quiet_days":    quiet,
+            "strong_days":   strong,
+            "today_quiet":   today_quiet,
+            "today_strong":  today_strong,
+        }
+        return result
+
+
+# ---------------------------------------------------------------------------
+# RelationshipStageProvider — coaching tone calibrated to relationship age
+# ---------------------------------------------------------------------------
+
+class RelationshipStageProvider(ContextProvider):
+    """
+    Determines the relationship stage (new / warming / established / close)
+    from days texting + total message count. Injects a tone calibration
+    instruction so the coach's voice naturally deepens over time.
+    """
+
+    @property
+    def name(self) -> str:
+        return "relationship"
+
+    async def fetch(self, user_id: str, params: dict) -> ProviderResult:
+        result = ProviderResult()
+
+        try:
+            # First message date — 1 row, cheap
+            first_res = (
+                supabase.table("messages")
+                .select("created_at")
+                .eq("user_id", user_id)
+                .order("created_at", desc=False)
+                .limit(1)
+                .execute()
+            )
+            if not first_res.data:
+                return result
+
+            first_dt = datetime.fromisoformat(
+                first_res.data[0]["created_at"].replace("Z", "+00:00")
+            )
+            days = (datetime.now(timezone.utc).date() - first_dt.date()).days
+
+            # Message count — fetch up to 200 IDs (lightweight; enough for all thresholds)
+            count_res = (
+                supabase.table("messages")
+                .select("id")
+                .eq("user_id", user_id)
+                .limit(200)
+                .execute()
+            )
+            total = len(count_res.data or [])
+
+        except Exception:
+            logger.exception(f"[RelationshipStageProvider] fetch failed for {user_id}")
+            return result
+
+        if days <= 3 or total < 10:
+            stage       = "new"
+            instruction = (
+                "You are still getting to know this person. Be warm but not overly casual yet. "
+                "Ask questions to understand who they are."
+            )
+        elif days <= 14 or total < 50:
+            stage       = "warming"
+            instruction = (
+                "You know the basics about this person now. Start showing you remember things "
+                "they've told you. Get slightly more direct and casual."
+            )
+        elif days <= 30 or total < 150:
+            stage       = "established"
+            instruction = (
+                "You know this person well. Reference shared history naturally. Be genuinely casual. "
+                "Push harder — you've earned that trust."
+            )
+        else:
+            stage       = "close"
+            instruction = (
+                "This is a real ongoing relationship. You know their patterns, struggles, and wins. "
+                "Text like someone who has been in their corner for months. Be real, direct, and warm."
+            )
+
+        result.prompt_lines.append(
+            f"Relationship: {days} day{'s' if days != 1 else ''} texting, "
+            f"{total}{'+ ' if total >= 200 else ' '}messages — {stage} stage"
+        )
+        result.prompt_lines.append(f"Tone calibration: {instruction}")
+
+        result.metadata = {
+            "stage":          stage,
+            "days":           days,
+            "total_messages": total,
+            "instruction":    instruction,
+        }
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
+
 PROVIDERS: list[ContextProvider] = [
     UserContextProvider(),
     FitnessProvider(),
     ReminderProvider(),
     NutritionProvider(),
+    HabitPatternProvider(),
+    RelationshipStageProvider(),
     # SleepProvider(),      ← add when sleep_logs table is ready
-    # MoodTrendProvider(),
 ]
 
 
@@ -562,6 +787,164 @@ async def get_coaching_context(
 # ---------------------------------------------------------------------------
 # Feedback Loop — save coach insights back into user_context
 # ---------------------------------------------------------------------------
+
+async def get_memory_block(user_id: str) -> str:
+    """
+    Fetch the user's rolling memory document and format it as a system prompt block.
+    Returns an empty string if no memory exists yet.
+
+    Injected into every Gemini call so the coach always has long-term context
+    about who this person is — their patterns, wins, obstacles, and how to talk to them.
+    """
+    try:
+        res = (
+            supabase.table("user_memory")
+            .select("memory_doc")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if not res.data or not res.data[0].get("memory_doc"):
+            return ""
+
+        doc = res.data[0]["memory_doc"]
+        if not isinstance(doc, dict) or not any(doc.values()):
+            return ""
+
+        lines: list[str] = []
+        if doc.get("personality_signals"):
+            lines.append(f"Personality: {'; '.join(doc['personality_signals'])}")
+        if doc.get("relationship_notes"):
+            lines.append(f"Relationship notes: {'; '.join(doc['relationship_notes'])}")
+        if doc.get("recurring_obstacles"):
+            lines.append(f"Recurring obstacles: {'; '.join(doc['recurring_obstacles'])}")
+        if doc.get("big_wins"):
+            lines.append(f"Big wins: {'; '.join(doc['big_wins'])}")
+        if doc.get("unresolved_topics"):
+            lines.append(f"Bring up naturally when relevant: {'; '.join(doc['unresolved_topics'])}")
+        if doc.get("coach_calibration"):
+            lines.append(f"What works for this person: {'; '.join(doc['coach_calibration'])}")
+
+        if not lines:
+            return ""
+
+        return (
+            "[LONG-TERM MEMORY — what you know about this person over time]\n"
+            + "\n".join(lines)
+        )
+    except Exception:
+        logger.exception(f"[memory] get_memory_block failed for {user_id}")
+        return ""
+
+
+async def update_user_memory(user_id: str, messages: list) -> None:
+    """
+    Read the last 30 messages + existing memory doc, call Gemini to produce
+    an updated memory document via rolling merge, and upsert to user_memory.
+
+    The merge keeps the best 5 entries per section — it never throws away
+    history, it distills it. Called nightly by rebuild_user_memories().
+    Requires at least 20 messages to produce a meaningful memory.
+    """
+    import json as _json
+    import google.generativeai as genai
+    import os
+
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+    # Fetch existing memory doc
+    try:
+        existing_res = (
+            supabase.table("user_memory")
+            .select("memory_doc")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        existing_doc = existing_res.data[0].get("memory_doc", {}) if existing_res.data else {}
+        if not isinstance(existing_doc, dict):
+            existing_doc = {}
+    except Exception:
+        logger.exception(f"[memory] failed to fetch existing memory for {user_id}")
+        existing_doc = {}
+
+    # Format messages for Gemini
+    message_text = "\n".join(
+        f"{'User' if m['direction'] == 'inbound' else 'Coach'}: {m['body']}"
+        for m in messages[-30:]
+    )
+
+    existing_json = _json.dumps(existing_doc, indent=2) if existing_doc else "{}"
+
+    prompt = f"""You are updating a coaching memory document. The coach uses this to remember key facts about their user across weeks.
+
+EXISTING MEMORY:
+{existing_json}
+
+RECENT CONVERSATION (last 30 messages):
+{message_text}
+
+Update the memory by merging new signals from the conversation with the existing memory.
+Rules:
+- Keep each entry short (one phrase or sentence)
+- Cap each section at 5 entries — keep the most useful ones, drop generic ones
+- Only add something if it's genuinely specific and signal-rich (e.g. "gets defensive on Sundays" not "misses workouts sometimes")
+- For unresolved_topics: things the user mentioned that were never followed up on (interviews, life events, etc.)
+- For coach_calibration: specific communication tips that would make THIS coach more effective with THIS person
+- Remove entries clearly contradicted by new info
+- Return only valid JSON, no explanation
+
+Return JSON with exactly these keys:
+{{
+  "last_updated": "{date.today().isoformat()}",
+  "personality_signals": [],
+  "relationship_notes": [],
+  "recurring_obstacles": [],
+  "big_wins": [],
+  "unresolved_topics": [],
+  "coach_calibration": []
+}}"""
+
+    try:
+        model = genai.GenerativeModel(model_name="gemini-2.5-flash-lite")
+        response = model.generate_content(prompt)
+        raw = response.text.strip()
+        # Strip JSON fences if present
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1].lstrip("json").strip() if len(parts) > 1 else raw
+
+        new_doc = _json.loads(raw)
+        if not isinstance(new_doc, dict):
+            raise ValueError("Gemini returned non-dict")
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Upsert — one row per user
+        existing_row = (
+            supabase.table("user_memory")
+            .select("id")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if existing_row.data:
+            supabase.table("user_memory").update({
+                "memory_doc": new_doc,
+                "updated_at": now_iso,
+            }).eq("user_id", user_id).execute()
+        else:
+            supabase.table("user_memory").insert({
+                "user_id":    user_id,
+                "memory_doc": new_doc,
+                "updated_at": now_iso,
+            }).execute()
+
+        logger.info(f"[memory] updated memory doc for user={user_id}")
+
+    except Exception:
+        logger.exception(f"[memory] update_user_memory failed for {user_id}")
+
 
 async def save_coach_insight(user_id: str, insight_text: str) -> None:
     """

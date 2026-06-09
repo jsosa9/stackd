@@ -4,10 +4,10 @@ onboarding.py — SMS-driven coach onboarding state machine.
 State transitions (stored in users.onboarding_step):
   None/unknown → 0  : auto-create user, ask for coach name
   0 → 1             : start persona setup in background, ack
-  1 → 2             : (background) persona ready — sends intro + goals preview + timezone ask
-  2 → 3             : timezone received → store → ask for goals+schedule
-  3 → 4             : extract goals+schedule → insert → send recap
-  4 → 5             : recap confirmed → ask check-in preference
+  1 → 2             : (background) persona ready — sends intro + timezone ask
+  2 → 3             : timezone received → store → ask open-ended improvement question
+  3 → 5             : save coaching_opportunity → ask check-in preference
+  4 → 5             : legacy redirect (users on old flow)
   5 → 6             : check-in preference received → finalize
   6+                : return None (fall through to process_inbound_sms)
 """
@@ -363,6 +363,54 @@ async def _build_recap(user_id: str, coach_prompt: str, supabase, pending_items:
     return await _coach_voice(coach_prompt, recap_prompt)
 
 
+async def _ask_goals_question(coach_prompt: str) -> str:
+    """Open-ended coach-voice question — no structure, no schedule hints."""
+    return await _coach_voice(
+        coach_prompt,
+        "Ask the user what they want to improve or lock in right now. "
+        "Sound like a coach having a real conversation, not a form. "
+        "One short question. Do NOT ask for days, times, or schedules. "
+        "Do NOT give examples of habit formats.",
+    )
+
+
+async def _ask_improvement_question(coach_prompt: str) -> str:
+    """Onboarding step 3 opener — ask what the user wants to improve, purely conversational."""
+    return await _coach_voice(
+        coach_prompt,
+        "Ask the user one open-ended question: what are they trying to improve right now? "
+        "Sound like a coach in the first real conversation with a new client. "
+        "The question must invite discussion of goals, challenges, habits, or ambitions. "
+        "One question only. Do NOT ask for days, times, or schedules.",
+    )
+
+
+async def _acknowledge_and_consolidate(activities: list[str], coach_prompt: str) -> str:
+    """
+    Acknowledge all detected goals in one sentence, then ask ONE consolidation question
+    about when they want to fit them in. Never asks per-goal, never lists day options.
+    """
+    if not activities:
+        return await _coach_voice(
+            coach_prompt,
+            "The user described what they want to work on. Acknowledge it briefly and ask "
+            "when during the week they realistically want to fit it in. One sentence each. "
+            "Sound like a coach, not a scheduler.",
+        )
+    if len(activities) == 1:
+        listed = activities[0]
+    else:
+        listed = ", ".join(activities[:-1]) + f", and {activities[-1]}"
+    instruction = (
+        f"The user wants to work on: {listed}. "
+        "Acknowledge all of these together in ONE short sentence using their exact words. "
+        "Then ask ONE question: when during the week they realistically want to fit these in. "
+        "Do not ask per-goal. Do not list days or times as options. "
+        "Sound like a coach, not a scheduler. Two sentences total."
+    )
+    return await _coach_voice(coach_prompt, instruction)
+
+
 def _send_sms(to: str, body: str) -> None:
     send_reply(to, body)
 
@@ -378,7 +426,7 @@ def _expires_24h() -> str:
 async def setup_and_intro(user_id: str, to_number: str, name: str, supabase) -> None:
     """
     Run after webhook returns. Fetches or creates the persona, inserts
-    coach_settings, sends 3 messages (intro, goals preview, city ask), advances step to 2.
+    coach_settings, sends 2 messages (intro, timezone ask), advances step to 2.
     """
     try:
         persona = await persona_manager.fetch_persona_by_name(name)
@@ -407,19 +455,7 @@ async def setup_and_intro(user_id: str, to_number: str, name: str, supabase) -> 
         )
         _send_sms(to_number, intro)
 
-        # Message 2: goals preview — persona voice opener + in-character example
-        goals_opener = await _coach_voice(
-            system_prompt,
-            "Ask what habits the user wants to track and when. One short sentence in your voice. Do not include an example."
-        )
-        goals_example = await _coach_voice(
-            system_prompt,
-            "Give one short example of a habit with a schedule, like 'gym Monday Wednesday Friday at 6pm'. One phrase only, no intro sentence. Stay in your voice."
-        )
-        goals_msg = f"{goals_opener} Like {goals_example}"
-        _send_sms(to_number, goals_msg)
-
-        # Message 3: timezone ask — in character opener + hardcoded options
+        # Message 2: timezone ask — in character opener + hardcoded options
         tz_opener = await _coach_voice(
             system_prompt,
             "Ask what time zone they are in so you know when to text them. One short sentence in your voice. Do not list examples."
@@ -519,26 +555,44 @@ async def _finalize_onboarding(
     import asyncio
     asyncio.create_task(_rebuild())
 
-    # Build wrap-up with actual goal context so it's concrete, not generic
+    # Build wrap-up — concrete if goals exist, opportunity-anchored if not
     try:
         goals_data = supabase.table("goals").select("activity, days").eq("user_id", user_id).execute().data or []
-        goals_summary = ", ".join(g["activity"] for g in goals_data) if goals_data else "your goals"
-        first_goal = goals_data[0]["activity"] if goals_data else None
-        specific_hint = (
-            f"Mention {first_goal} by name as one example of what's coming. "
-            if first_goal else ""
-        )
     except Exception:
-        goals_summary = "your goals"
-        specific_hint = ""
+        goals_data = []
 
-    wrap_up = await _coach_voice(
-        coach_prompt,
-        f"Onboarding complete. The user has set up: {goals_summary}. "
-        f"Tell them you will text them before each activity, send a daily check-in, and a nightly recap. "
-        f"{specific_hint}"
-        "Be specific about what they will hear from you. One SMS. Stay in character."
-    )
+    try:
+        if goals_data:
+            goals_summary = ", ".join(g["activity"] for g in goals_data)
+            first_goal = goals_data[0]["activity"]
+            wrap_prompt = (
+                f"Onboarding complete. The user has set up: {goals_summary}. "
+                f"Tell them you will text them before each activity, send a daily check-in, and a nightly recap. "
+                f"Mention {first_goal} by name as one example of what's coming. "
+                "Be specific. One SMS. Stay in character."
+            )
+        else:
+            opp_res = (
+                supabase.table("user_context")
+                .select("description")
+                .eq("user_id", user_id)
+                .eq("type", "coaching_opportunity")
+                .limit(1)
+                .execute()
+            )
+            opp = opp_res.data[0]["description"][:200] if opp_res.data else None
+            context = f"The user shared they want to work on: {opp}." if opp else "The user just finished setting up."
+            wrap_prompt = (
+                f"Onboarding is complete. {context} "
+                "Tell them you are here and ready to work with them. Keep it short and motivating. "
+                "Do NOT promise specific activity reminders since no habits have been set up yet. "
+                "One SMS. Stay in character."
+            )
+        wrap_up = await _coach_voice(coach_prompt, wrap_prompt)
+    except Exception:
+        logger.exception(f"[onboarding] failed to build wrap-up for user={user_id}")
+        wrap_up = await _coach_voice(coach_prompt, "You are all set up. Tell them you will be in touch. One sentence.")
+
     return wrap_up
 
 
@@ -647,201 +701,50 @@ async def handle_onboarding(
             supabase.table("users").update({"onboarding_step": 3}).eq("id", user_id).execute()
             logger.info(f"[onboarding] user={user_id} tz_input='{tz_input}' tz='{tz}' step→3")
 
-            # Ask for goals+schedule — example generated in-character to match persona voice
-            goals_ask = await _coach_voice(
-                coach_prompt,
-                "Tell the user you have their timezone and now ask what habits they want to work on and when. One sentence in your voice."
-            )
-            example = await _coach_voice(
-                coach_prompt,
-                "Give one short example of a habit with a schedule, like 'gym Monday Wednesday Friday at 6pm'. One phrase only, no intro sentence. Stay in your voice."
-            )
-            return f"{goals_ask} Like {example}"
+            return await _ask_improvement_question(coach_prompt)
 
-    # ── Step 3 — goals+schedule received ──────────────────────────────────
+    # ── Step 3 — user shares what they want to improve ───────────────────────
+    # No goal extraction. Save their answer as a coaching opportunity and move on.
     if step == 3:
         coach_res = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
         coach_prompt = coach_res.data[0].get("generated_system_prompt", "") if coach_res.data else ""
 
-        # Check retry count
-        ctx_res = (
-            supabase.table("user_context")
-            .select("id, metadata")
-            .eq("user_id", user_id)
-            .eq("type", "onboarding_goals")
-            .limit(1)
-            .execute()
+        try:
+            supabase.table("user_context").delete().eq("user_id", user_id).eq("type", "coaching_opportunity").execute()
+            supabase.table("user_context").insert({
+                "user_id": user_id,
+                "type": "coaching_opportunity",
+                "description": message_body[:500],
+                "metadata": {"source": "onboarding"},
+                "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+            }).execute()
+            logger.info(f"[onboarding] user={user_id} coaching_opportunity saved from onboarding")
+        except Exception:
+            logger.exception(f"[onboarding] failed to save coaching_opportunity for user={user_id}")
+
+        supabase.table("users").update({"onboarding_step": 5}).eq("id", user_id).execute()
+        logger.info(f"[onboarding] user={user_id} step→5")
+
+        return await _coach_voice(
+            coach_prompt,
+            "The user just told you what they want to work on. Acknowledge it briefly in one sentence in your voice. "
+            "Then ask if they want a daily check-in text from you. If yes, ask what time. "
+            "Give an example like 8am or 9pm. Tell them to reply no to skip. "
+            "No em dashes, no bullets, no markdown. Two sentences total."
         )
-        retry_count = (ctx_res.data[0].get("metadata") or {}).get("retry_count", 0) if ctx_res.data else 0
-        ctx_id = ctx_res.data[0]["id"] if ctx_res.data else None
 
-        extracted = await _extract_goals_and_schedule(message_body)
-
-        if extracted is None:
-            # Extraction failed
-            if retry_count >= 2:
-                # Force advance to step 4 with whatever is in DB
-                logger.warning(f"[onboarding] user={user_id} step 3 max retries hit, advancing to step 4")
-                if ctx_id:
-                    supabase.table("user_context").delete().eq("id", ctx_id).execute()
-                supabase.table("users").update({"onboarding_step": 4}).eq("id", user_id).execute()
-                return await _build_recap(user_id, coach_prompt, supabase, pending_items=None)
-
-            new_retry = retry_count + 1
-            if ctx_id:
-                supabase.table("user_context").update({"metadata": {"retry_count": new_retry}}).eq("id", ctx_id).execute()
-            else:
-                supabase.table("user_context").insert({
-                    "user_id": user_id,
-                    "type": "onboarding_goals",
-                    "description": "retry",
-                    "metadata": {"retry_count": new_retry},
-                    "expires_at": _expires_24h(),
-                }).execute()
-
-            return await _coach_voice(
-                coach_prompt,
-                "The user's reply was unclear. Ask them to list their activities and schedule again. Give the example: gym Monday Wednesday Friday at 6pm or reading every night at 9pm. One sentence in your voice."
-            )
-
-        # Insert goals into DB — merge if same activity appears multiple times (different time groups)
-        for item in extracted:
-            try:
-                existing = (
-                    supabase.table("goals")
-                    .select("id, days, times_per_day")
-                    .eq("user_id", user_id)
-                    .ilike("activity", item["activity"])
-                    .limit(1)
-                    .execute()
-                )
-                payload = _build_goal_payload(item)
-                if existing.data:
-                    ex = existing.data[0]
-                    merged_days = list(set((ex.get("days") or []) + payload.get("days", [])))
-                    merged_times = {**(ex.get("times_per_day") or {}), **(payload.get("times_per_day") or {})}
-                    merge = {}
-                    if merged_days:
-                        merge["days"] = merged_days
-                    if merged_times:
-                        merge["times_per_day"] = merged_times
-                    if merge:
-                        supabase.table("goals").update(merge).eq("id", ex["id"]).execute()
-                else:
-                    supabase.table("goals").insert({
-                        "user_id": user_id,
-                        "activity": item["activity"],
-                        "category": "fitness",
-                        "days": payload.get("days", []),
-                        "times_per_day": payload.get("times_per_day"),
-                    }).execute()
-                logger.info(f"[onboarding] user={user_id} goal '{item['activity']}' days={item['days']} time={item['time']}")
-            except Exception:
-                logger.exception(f"[onboarding] failed to insert/update goal '{item['activity']}' for user={user_id}")
-
-        # Clean up retry context
-        if ctx_id:
-            supabase.table("user_context").delete().eq("id", ctx_id).execute()
-
-        supabase.table("users").update({"onboarding_step": 4}).eq("id", user_id).execute()
-        logger.info(f"[onboarding] user={user_id} goals inserted, step→4")
-
-        return await _build_recap(user_id, coach_prompt, supabase, pending_items=extracted)
-
-    # ── Step 4 — recap confirmation ───────────────────────────────────────
+    # ── Step 4 — legacy redirect (users who started before the new flow) ─────
     if step == 4:
         coach_res = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
         coach_prompt = coach_res.data[0].get("generated_system_prompt", "") if coach_res.data else ""
 
-        ctx_res = (
-            supabase.table("user_context")
-            .select("id, metadata")
-            .eq("user_id", user_id)
-            .eq("type", "onboarding_recap")
-            .limit(1)
-            .execute()
+        supabase.table("users").update({"onboarding_step": 5}).eq("id", user_id).execute()
+        logger.info(f"[onboarding] user={user_id} step 4 legacy redirect→5")
+
+        return await _coach_voice(
+            coach_prompt,
+            "Ask the user if they want a daily check-in text from you. If yes, ask what time. Give an example like 8am or 9pm. Tell them to reply no to skip. No em dashes, no bullets, no markdown. One SMS."
         )
-        correction_count = (ctx_res.data[0].get("metadata") or {}).get("correction_count", 0) if ctx_res.data else 0
-        ctx_id = ctx_res.data[0]["id"] if ctx_res.data else None
-
-        answered_yes = await _parse_yes_no(message_body)
-
-        def _advance_to_checkin():
-            if ctx_id:
-                supabase.table("user_context").delete().eq("id", ctx_id).execute()
-            supabase.table("users").update({"onboarding_step": 5}).eq("id", user_id).execute()
-
-        if answered_yes is True or correction_count >= 1:
-            _advance_to_checkin()
-            logger.info(f"[onboarding] user={user_id} recap confirmed, step→5")
-            checkin_q = await _coach_voice(
-                coach_prompt,
-                "Ask the user if they want a daily check-in text from you. If yes, ask what time. Give an example like 8am or 9pm. Tell them to reply no to skip. No em dashes, no bullets, no markdown. One SMS."
-            )
-            return checkin_q
-
-        # Try to parse as a correction — use the dedicated extractor that maps to existing goal names
-        existing_goals = (
-            supabase.table("goals")
-            .select("id, activity, days")
-            .eq("user_id", user_id)
-            .execute()
-            .data or []
-        )
-        corrected = await _extract_correction(message_body, existing_goals)
-        if corrected:
-            goal_by_name = {g["activity"].lower(): g for g in existing_goals}
-
-            # Group by activity — same activity may appear multiple times for different time slots
-            grouped: dict[str, list[dict]] = {}
-            for item in corrected:
-                key = item["activity"].lower()
-                grouped.setdefault(key, []).append(item)
-
-            for activity_lower, items in grouped.items():
-                matched = goal_by_name.get(activity_lower)
-                if not matched:
-                    continue
-
-                all_days: list[str] = []
-                times_map: dict = {}
-                for item in items:
-                    days_lower = [d.lower() for d in item["days"]]
-                    all_days.extend(days_lower)
-                    if item["time"] and days_lower:
-                        for d in days_lower:
-                            if d in _FULL_TO_ABBR:
-                                times_map[_FULL_TO_ABBR[d]] = {"times": [item["time"]]}
-                    elif item["time"] and not days_lower:
-                        # Time without days — apply to existing stored days
-                        for d in (matched.get("days") or []):
-                            if d in _FULL_TO_ABBR:
-                                times_map[_FULL_TO_ABBR[d]] = {"times": [item["time"]]}
-
-                update_payload: dict = {}
-                if all_days:
-                    update_payload["days"] = list(set(all_days))
-                if times_map:
-                    update_payload["times_per_day"] = times_map
-
-                if update_payload:
-                    supabase.table("goals").update(update_payload).eq("id", matched["id"]).execute()
-                    logger.info(f"[onboarding] step 4 correction applied to goal='{matched['activity']}' payload={update_payload}")
-
-        # Store correction count and re-send recap
-        new_count = correction_count + 1
-        if ctx_id:
-            supabase.table("user_context").update({"metadata": {"correction_count": new_count}}).eq("id", ctx_id).execute()
-        else:
-            supabase.table("user_context").insert({
-                "user_id": user_id,
-                "type": "onboarding_recap",
-                "description": "awaiting_confirmation",
-                "metadata": {"correction_count": new_count},
-                "expires_at": _expires_24h(),
-            }).execute()
-
-        return await _build_recap(user_id, coach_prompt, supabase)
 
     # ── Step 5 — check-in preference ──────────────────────────────────────
     if step == 5:
