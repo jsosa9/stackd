@@ -767,8 +767,6 @@ async def generate_motivation_text(user_id: str, user_timezone: str = "America/N
         system_prompt = coach_row["generated_system_prompt"]
 
     examples_block = await get_persona_examples_block(coach_row)
-    if examples_block and examples_block not in system_prompt:
-        system_prompt = f"{system_prompt}\n\nVOICE CALIBRATION — these are real examples of how you speak. Match this EXACTLY in every reply:\n\n{examples_block}"
 
     personality_context = await get_user_personality_context(user_id)
     if personality_context:
@@ -786,7 +784,11 @@ async def generate_motivation_text(user_id: str, user_timezone: str = "America/N
     except Exception:
         logger.warning(f"[motivation] coaching context failed for user={user_id} — continuing without it")
 
-    system_prompt = f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}\n\n{CONVICTION_RULES}"
+    _persona_voice_block = (
+        "\n\nPERSONA VOICE — your character, your words, your rhythm. Every sentence must sound like you. "
+        "This is not a suggestion. The rules above are guardrails. THIS is your identity. "
+        "Match this speaking style exactly:\n\n" + examples_block
+    ) if examples_block else ""
 
     # Fetch motivation style preferences
     sched_res = supabase.table("schedule").select("motivation_styles, motivation_frequency").eq("user_id", user_id).execute()
@@ -796,7 +798,7 @@ async def generate_motivation_text(user_id: str, user_timezone: str = "America/N
     # Call Gemini Flash 1.5
     model = genai.GenerativeModel(
         model_name="gemini-2.5-flash-lite",
-        system_instruction=system_prompt,
+        system_instruction=f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}\n\n{CONVICTION_RULES}{_persona_voice_block}",
     )
 
     prompt = (
@@ -917,15 +919,19 @@ async def generate_contextual_checkin(
         system_prompt = coach_row["generated_system_prompt"]
 
     examples_block = await get_persona_examples_block(coach_row)
-    if examples_block and examples_block not in system_prompt:
-        system_prompt = f"{system_prompt}\n\nVOICE CALIBRATION — these are real examples of how you speak. Match this EXACTLY in every reply:\n\n{examples_block}"
 
     personality_context = await get_user_personality_context(user_id)
     if personality_context:
         system_prompt = f"{system_prompt}\n\n{personality_context}"
 
     system_prompt = await _augment_with_memory(user_id, system_prompt)
-    system_prompt = f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}\n\n{CONVICTION_RULES}"
+
+    _persona_voice_block = (
+        "\n\nPERSONA VOICE — your character, your words, your rhythm. Every sentence must sound like you. "
+        "This is not a suggestion. The rules above are guardrails. THIS is your identity. "
+        "Match this speaking style exactly:\n\n" + examples_block
+    ) if examples_block else ""
+    system_prompt = f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}\n\n{CONVICTION_RULES}{_persona_voice_block}"
 
     messages_res = (
         supabase.table("messages")
@@ -1059,15 +1065,19 @@ async def generate_nightly_summary(
         system_prompt = coach_row["generated_system_prompt"]
 
     examples_block = await get_persona_examples_block(coach_row)
-    if examples_block and examples_block not in system_prompt:
-        system_prompt = f"{system_prompt}\n\nVOICE CALIBRATION — these are real examples of how you speak. Match this EXACTLY in every reply:\n\n{examples_block}"
 
     personality_context = await get_user_personality_context(user_id)
     if personality_context:
         system_prompt = f"{system_prompt}\n\n{personality_context}"
 
     system_prompt = await _augment_with_memory(user_id, system_prompt)
-    system_prompt = f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}\n\n{CONVICTION_RULES}"
+
+    _persona_voice_block = (
+        "\n\nPERSONA VOICE — your character, your words, your rhythm. Every sentence must sound like you. "
+        "This is not a suggestion. The rules above are guardrails. THIS is your identity. "
+        "Match this speaking style exactly:\n\n" + examples_block
+    ) if examples_block else ""
+    system_prompt = f"{system_prompt}\n\n{HUMAN_BEHAVIOR_RULES}\n\n{CONVICTION_RULES}{_persona_voice_block}"
 
     # Inject supplemental coaching context (nutrition logged today, any reminders)
     # The completions/missed_goals/user_context_today are already provided by the scheduler

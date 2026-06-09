@@ -2901,12 +2901,13 @@ async def _generate_voice_reply(
     """
     system_prompt = coach.get("generated_system_prompt") or ""
 
-    # Persona examples
+    # Persona examples — collected here, injected at END of system_instruction
+    # (not into system_prompt early) so they land after all coaching rules and
+    # carry the highest attention weight in Gemini's context window.
+    examples_block = ""
     try:
         from routes.ai import get_persona_examples_block
         examples_block = await get_persona_examples_block(coach)
-        if examples_block and examples_block not in system_prompt:
-            system_prompt += "\n\nVOICE CALIBRATION — match this speaking style EXACTLY:\n\n" + examples_block
     except Exception:
         logger.exception("[voice] persona augmentation failed")
 
@@ -3057,6 +3058,12 @@ async def _generate_voice_reply(
         "SMS. Real. Never more than 4 sentences."
     )
 
+    _persona_voice_block = (
+        "\n\nPERSONA VOICE — your character, your words, your rhythm. Every sentence must sound like you. "
+        "This is not a suggestion. The rules above are guardrails. THIS is your identity. "
+        "Match this speaking style exactly:\n\n" + examples_block
+    ) if examples_block else ""
+
     model = genai.GenerativeModel(
         model_name="gemini-2.5-flash-lite",
         system_instruction=(
@@ -3067,6 +3074,7 @@ async def _generate_voice_reply(
             f"{_COACHING_EXPERIENCE_RULES}\n\n"
             f"{HUMAN_BEHAVIOR_RULES}\n\n"
             f"{CONVICTION_RULES}"
+            f"{_persona_voice_block}"
         ),
     )
     chat     = model.start_chat(history=gemini_history)

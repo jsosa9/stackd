@@ -40,6 +40,11 @@ _FULL_TO_ABBR = {d.lower(): _DAY_ABBRS[i] for i, d in enumerate(
     ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 )}
 
+_CORRECTION_RE = re.compile(
+    r"^(?:i mean|i meant|actually|sorry,?\s+i mean|no,?\s+i mean|correction[:,]?)\s+(.+)$",
+    re.IGNORECASE,
+)
+
 _TZ_MAP = {
     "eastern": "America/New_York",
     "est": "America/New_York",
@@ -657,6 +662,12 @@ async def handle_onboarding(
 
     # ── Step 1 — persona still being set up ───────────────────────────────
     if step == 1:
+        m = _CORRECTION_RE.match(message_body.strip())
+        if m:
+            corrected_name = m.group(1).strip()
+            background_tasks.add_task(setup_and_intro, user_id, from_number, corrected_name, supabase)
+            logger.info(f"[onboarding] user={user_id} corrected coach name to '{corrected_name}' at step 1")
+            return f"Got it, switching to {corrected_name}."
         coach_res = supabase.table("coach_settings").select("coach_name").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
         if not coach_res.data:
             return "Still setting things up, give me one more second."
@@ -664,6 +675,15 @@ async def handle_onboarding(
 
     # ── Step 2 — timezone received ────────────────────────────────────────
     if step == 2:
+        # Detect coach name correction before anything else
+        _corr = _CORRECTION_RE.match(message_body.strip())
+        if _corr:
+            corrected_name = _corr.group(1).strip()
+            background_tasks.add_task(setup_and_intro, user_id, from_number, corrected_name, supabase)
+            supabase.table("users").update({"onboarding_step": 1}).eq("id", user_id).execute()
+            logger.info(f"[onboarding] user={user_id} corrected coach name to '{corrected_name}' at step 2")
+            return f"Got it, switching to {corrected_name}."
+
         coach_res = supabase.table("coach_settings").select("generated_system_prompt").eq("user_id", user_id).eq("is_active", True).limit(1).execute()
         coach_prompt = coach_res.data[0].get("generated_system_prompt", "") if coach_res.data else ""
 
@@ -727,7 +747,8 @@ async def handle_onboarding(
 
         return await _coach_voice(
             coach_prompt,
-            "The user just told you what they want to work on. Acknowledge it briefly in one sentence in your voice. "
+            f"The user said this is what they want to work on: '{message_body[:300]}'. "
+            "In one sentence, acknowledge specifically what they said — use their actual words, do NOT reinterpret or substitute different goals. "
             "Then ask if they want a daily check-in text from you. If yes, ask what time. "
             "Give an example like 8am or 9pm. Tell them to reply no to skip. "
             "No em dashes, no bullets, no markdown. Two sentences total."
